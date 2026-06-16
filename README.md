@@ -18,6 +18,8 @@
 
 ## 快速开始
 
+### 本地运行
+
 ```bash
 # 1. 安装依赖
 uv sync
@@ -30,6 +32,22 @@ cp .env.example .env
 uv run python -m app.main
 # 或
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8999 --reload
+```
+
+### Docker
+
+```bash
+# 构建镜像
+docker build -t dangbei2api .
+
+# 运行容器
+docker run -d -p 8000:8000 --name dangbei2api dangbei2api
+
+# 自定义环境变量
+docker run -d -p 8000:8000 --name dangbei2api \
+  -e API_KEY=your-secret-key \
+  -e DANGBEI_TOKEN=your_token \
+  dangbei2api
 ```
 
 ## API 使用
