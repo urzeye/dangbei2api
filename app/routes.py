@@ -128,7 +128,10 @@ async def list_models():
     """
     列出当贝可用模型（OpenAI 格式）。
 
-    自动为每个模型追加变体，默认开启联网搜索和深度思考。
+    根据 getChatModelConfig 返回的 option[].disable 精确追加功能变体：
+    - 仅当 deep 的 disable=false 时才追加 -deep / -online-deep 变体
+    - 仅当 online 的 disable=false 时才追加 -online / -online-deep 变体
+    - -basic（无功能）始终可用
     """
     try:
         models = await dangbei_client.get_model_list()
@@ -138,13 +141,26 @@ async def list_models():
     data: list[ModelInfo] = []
     for m in models:
         model_id = m["value"]
-        # 基础模型
+        # 解析 option 数组，获取各能力的 disable 状态
+        options = m.get("option", [])
+        cap_disable: dict[str, bool] = {}
+        for opt in options:
+            cap_disable[opt.get("value", "")] = opt.get("disable", True)
+
+        has_deep = not cap_disable.get("deep", True)
+        has_online = not cap_disable.get("online", True)
+
+        # 基础模型（无后缀 → 默认行为：有能力的自动开启）
         data.append(ModelInfo(id=model_id))
-        # 追加变体
-        data.append(ModelInfo(id=f"{model_id}-online-deep"))
-        data.append(ModelInfo(id=f"{model_id}-online"))
-        data.append(ModelInfo(id=f"{model_id}-deep"))
+        # -basic：强制关闭所有能力
         data.append(ModelInfo(id=f"{model_id}-basic"))
+
+        if has_online and has_deep:
+            data.append(ModelInfo(id=f"{model_id}-online-deep"))
+        if has_online:
+            data.append(ModelInfo(id=f"{model_id}-online"))
+        if has_deep:
+            data.append(ModelInfo(id=f"{model_id}-deep"))
 
     return ModelListResponse(data=data)
 
