@@ -31,7 +31,7 @@ cp .env.example .env
 # 3. 启动
 uv run python -m app.main
 # 或
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8999 --reload
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### Docker
@@ -174,7 +174,7 @@ curl http://localhost:8000/v1/chat/completions \
 ### Response API
 
 ```bash
-curl http://localhost:8999/v1/responses \
+curl http://localhost:8000/v1/responses \
   -H "Content-Type: application/json" \
   -d '{
     "model": "glm-5-online-deep",
@@ -189,7 +189,7 @@ curl http://localhost:8999/v1/responses \
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:8999/v1",
+    base_url="http://localhost:8000/v1",
     api_key="your-secret-key",  # 对应 .env 中的 API_KEY，未配置则随意填
 )
 
@@ -250,7 +250,7 @@ r3 = client.chat.completions.create(
 ```bash
 # 不设置 API_KEY（默认）→ 免验证，任意 api_key 均可
 # 设置 API_KEY=my-secret → 必须携带正确 key
-curl http://localhost:8999/v1/models \
+curl http://localhost:8000/v1/models \
   -H "Authorization: Bearer my-secret"
 ```
 
