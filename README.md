@@ -2,6 +2,8 @@
 
 将[当贝 AI](https://ai.dangbei.com/chat) 网页版能力封装为 OpenAI 兼容 API。
 
+> ⚠️ **免责声明**：本项目仅用于学习研究，严禁用于任何商业用途或违反当贝服务条款的行为。使用者须自行承担一切法律风险与责任。
+
 ## 功能
 
 - ✅ `/v1/chat/completions` — OpenAI Chat Completions 格式（流式 + 非流式）
