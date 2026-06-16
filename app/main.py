@@ -36,7 +36,7 @@ async def root():
         "version": "0.1.0",
         "endpoints": {
             "/v1/chat/completions": "OpenAI chat completions (stream & non-stream)",
-            "/v1/response": "OpenAI Response API (stream & non-stream)",
+            "/v1/responses": "OpenAI Responses API (stream & non-stream)",
             "/v1/models": "List available models",
         },
         "auth": "enabled" if API_KEY else "disabled (set API_KEY to enable)",
