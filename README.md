@@ -42,7 +42,7 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-v3-online-deep",
+    "model": "glm-5-online-deep",
     "messages": [{"role": "user", "content": "你好"}],
     "stream": false
   }'
@@ -50,15 +50,17 @@ curl http://localhost:8000/v1/chat/completions \
 
 ### 模型功能变体
 
-通过模型名后缀控制联网搜索和深度思考，无需额外参数：
+通过模型名后缀控制联网搜索和深度思考，无需额外参数。
+
+> **注意**：变体是否可用取决于模型自身能力。`/v1/models` 会根据当贝 API 返回的 `option.disable` 精确列出每个模型支持的变体，不支持的能力不会出现对应后缀。
 
 | 请求模型名 | 效果 |
 |-----------|------|
-| `deepseek-v3-online-deep` | 联网搜索 + 深度思考（默认推荐） |
-| `deepseek-v3-online` | 仅联网搜索 |
-| `deepseek-v3-deep` | 仅深度思考 |
-| `deepseek-v3-basic` | 基础模型，无联网无深度思考 |
-| `deepseek-v3` | 等同于 `-online-deep`（默认开启） |
+| `{model}-online-deep` | 联网搜索 + 深度思考 |
+| `{model}-online` | 仅联网搜索 |
+| `{model}-deep` | 仅深度思考 |
+| `{model}-basic` | 基础模型，无联网无深度思考 |
+| `{model}` | 无后缀，自动开启模型支持的能力 |
 
 ```bash
 # 仅联网搜索
@@ -89,7 +91,7 @@ curl http://localhost:8000/v1/chat/completions \
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-v3-online-deep",
+    "model": "glm-5-online-deep",
     "messages": [{"role": "user", "content": "我叫小明"}],
     "user": "alice"
   }'
@@ -98,7 +100,7 @@ curl http://localhost:8000/v1/chat/completions \
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-v3-online-deep",
+    "model": "glm-5-online-deep",
     "messages": [{"role": "user", "content": "我叫什么名字？"}],
     "user": "alice"
   }'
@@ -110,7 +112,7 @@ curl http://localhost:8000/v1/chat/completions \
 curl http://localhost:8000/v1/response \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-v3-online-deep",
+    "model": "glm-5-online-deep",
     "input": [{"role": "user", "content": "你好"}],
     "stream": false
   }'
@@ -128,7 +130,7 @@ client = OpenAI(
 
 # 默认开启联网+深度思考
 response = client.chat.completions.create(
-    model="deepseek-v3-online-deep",
+    model="glm-5-online-deep",
     messages=[{"role": "user", "content": "今天天气怎么样？"}],
     user="alice",  # 相同 user 保持会话
     stream=True,
@@ -136,7 +138,7 @@ response = client.chat.completions.create(
 
 # 多轮对话 — 相同 user，自动复用会话
 r2 = client.chat.completions.create(
-    model="deepseek-v3-online-deep",
+    model="glm-5-online-deep",
     messages=[{"role": "user", "content": "刚才说了什么？"}],
     user="alice",
 )
@@ -157,7 +159,7 @@ r2 = client.chat.completions.create(
 | `doubao-thinking` | 豆包-1.5-thinking-pro | ✓ | ✓ |
 | `ernie-4.5-turbo-32k` | 文心4.5 | ✗ | ✓ |
 
-> `/v1/models` 会自动为每个模型追加 `-online-deep`、`-online`、`-deep`、`-basic` 变体。
+> `/v1/models` 根据当贝 API 返回的 `option.disable` 精确追加变体。例如 `deepseek-v3` 不支持深度思考，则不会出现 `-deep` / `-online-deep` 后缀。
 
 ## 配置说明
 
