@@ -1,10 +1,10 @@
 """
-Route handlers — 完整兼容 OpenAI /v1/chat/completions 和 /v1/response 协议。
+Route handlers — 完整兼容 OpenAI /v1/chat/completions 和 /v1/responses 协议。
 
 当贝专有参数通过标准 OpenAI 字段承载（零自定义 Header）：
   - userAction (online/deep): 模型名后缀，如 deepseek-v3-online-deep
   - 会话保持: user 字段（相同 user 值复用同一 conversationId）
-  - /v1/response 多轮: previous_response_id（标准字段）
+  - /v1/responses 多轮: previous_response_id（标准字段）
 """
 
 from __future__ import annotations
@@ -53,6 +53,9 @@ def _verify_api_key(credentials: HTTPAuthorizationCredentials | None = Depends(_
 user_store: dict[str, str] = {}          # user → conversation_id
 response_store: dict[str, str] = {}      # response_id → conversation_id
 
+# 未提供 user 字段时的默认会话 key（服务生命周期内复用同一会话）
+_DEFAULT_USER_KEY = "__default__"
+
 
 # ============================================================
 # 辅助函数
@@ -97,17 +100,16 @@ async def _get_or_create_conversation(user: str | None) -> str:
     """
     基于 user 字段获取或创建会话。
 
-    - user 为 None 或空字符串 → 每次创建新会话（无状态模式）
+    - user 为 None 或空字符串 → 使用默认 key 复用同一会话（有状态模式）
     - user 有值 → 查找 user_store，存在则复用，不存在则创建并存入
     """
-    if not user:
-        return await dangbei_client.create_conversation()
+    effective_user = user if user else _DEFAULT_USER_KEY
 
-    if user in user_store:
-        return user_store[user]
+    if effective_user in user_store:
+        return user_store[effective_user]
 
     conversation_id = await dangbei_client.create_conversation()
-    user_store[user] = conversation_id
+    user_store[effective_user] = conversation_id
     return conversation_id
 
 
@@ -118,7 +120,7 @@ async def _resolve_conversation_for_response(
     """
     为 /v1/response 解析 conversation_id。
 
-    优先级：previous_response_id > user > 新建
+    优先级：previous_response_id > user > 默认会话 > 新建
 
     返回 (conversation_id, is_new)。
     """
@@ -126,14 +128,14 @@ async def _resolve_conversation_for_response(
     if previous_response_id and previous_response_id in response_store:
         return response_store[previous_response_id], False
 
-    # 2. 通过 user 查找
-    if user and user in user_store:
-        return user_store[user], False
+    # 2. 通过 user 查找（含默认 key）
+    effective_user = user if user else _DEFAULT_USER_KEY
+    if effective_user in user_store:
+        return user_store[effective_user], False
 
     # 3. 新建会话
     conversation_id = await dangbei_client.create_conversation()
-    if user:
-        user_store[user] = conversation_id
+    user_store[effective_user] = conversation_id
     return conversation_id, True
 
 
@@ -280,13 +282,13 @@ async def chat_completions(req: ChatCompletionRequest, _auth: None = Depends(_ve
 
 
 # ============================================================
-# /v1/response
+# /v1/responses
 # ============================================================
 
-@router.post("/v1/response")
-async def response_api(req: ResponseRequest, _auth: None = Depends(_verify_api_key)):
+@router.post("/v1/responses")
+async def responses_api(req: ResponseRequest, _auth: None = Depends(_verify_api_key)):
     """
-    OpenAI 兼容 /v1/response 端点。
+    OpenAI 兼容 /v1/responses 端点。
 
     支持流式 (SSE) 和非流式。
     - 模型名后缀控制 userAction
