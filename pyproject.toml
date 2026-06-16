@@ -2,7 +2,7 @@
 name = "dangbei2api"
 version = "0.1.0"
 description = "将当贝 AI 网页版能力封装为 OpenAI 兼容 API"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
