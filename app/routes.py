@@ -12,11 +12,12 @@ from __future__ import annotations
 import json
 import uuid as uuid_lib
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app import converters, dangbei_client
-from app.config import DEFAULT_MODEL
+from app.config import API_KEY, DEFAULT_MODEL
 from app.models import (
     ChatCompletionRequest,
     Message,
@@ -26,6 +27,23 @@ from app.models import (
 )
 
 router = APIRouter()
+
+# ---------------------------------------------------------------------------
+# API Key 鉴权（可选）
+#   - 未配置 API_KEY → 免验证，向后兼容
+#   - 配置了 API_KEY → 必须带 Authorization: Bearer <key>
+# ---------------------------------------------------------------------------
+_security = HTTPBearer(auto_error=False)
+
+
+def _verify_api_key(credentials: HTTPAuthorizationCredentials | None = Depends(_security)) -> None:
+    """验证 Bearer Token，未配置 API_KEY 时跳过。"""
+    if not API_KEY:
+        return  # 免验证模式
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="缺少 API Key，请通过 Authorization: Bearer <key> 提供")
+    if credentials.credentials != API_KEY:
+        raise HTTPException(status_code=403, detail="API Key 无效")
 
 # ---------------------------------------------------------------------------
 # 会话映射表（内存）
@@ -124,7 +142,7 @@ async def _resolve_conversation_for_response(
 # ============================================================
 
 @router.get("/v1/models")
-async def list_models():
+async def list_models(_auth: None = Depends(_verify_api_key)):
     """
     列出当贝可用模型（OpenAI 格式）。
 
@@ -170,7 +188,7 @@ async def list_models():
 # ============================================================
 
 @router.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest):
+async def chat_completions(req: ChatCompletionRequest, _auth: None = Depends(_verify_api_key)):
     """
     OpenAI 兼容 /v1/chat/completions 端点。
 
@@ -266,7 +284,7 @@ async def chat_completions(req: ChatCompletionRequest):
 # ============================================================
 
 @router.post("/v1/response")
-async def response_api(req: ResponseRequest):
+async def response_api(req: ResponseRequest, _auth: None = Depends(_verify_api_key)):
     """
     OpenAI 兼容 /v1/response 端点。
 

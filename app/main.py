@@ -10,7 +10,7 @@ Usage:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routes import router
-from app.config import HOST, PORT
+from app.config import API_KEY, HOST, PORT
 
 app = FastAPI(
     title="Dangbei2API",
@@ -35,10 +35,11 @@ async def root():
         "service": "Dangbei2API",
         "version": "0.1.0",
         "endpoints": {
-            "/chat/completions": "OpenAI chat completions (stream & non-stream)",
+            "/v1/chat/completions": "OpenAI chat completions (stream & non-stream)",
             "/v1/response": "OpenAI Response API (stream & non-stream)",
             "/v1/models": "List available models",
         },
+        "auth": "enabled" if API_KEY else "disabled (set API_KEY to enable)",
         "anonymous_mode": "No token configured — file upload disabled",
     }
 

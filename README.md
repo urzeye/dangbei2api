@@ -10,6 +10,7 @@
 - ✅ 支持联网搜索 (`online`) 和深度思考 (`deep`)
 - ✅ **多轮对话**：通过标准 `user` 字段保持会话上下文
 - ✅ **零自定义 Header**：完全使用 OpenAI 标准协议字段
+- ✅ **API Key 鉴权**：可选 `Authorization: Bearer` 验证，完全兼容 OpenAI SDK
 - ✅ 匿名免登模式（自动换 deviceid 绕过配额限制）
 - ⚠️ 文件上传需配置登录 token
 
@@ -26,7 +27,7 @@ cp .env.example .env
 # 3. 启动
 uv run python -m app.main
 # 或
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8999 --reload
 ```
 
 ## API 使用
@@ -124,8 +125,8 @@ curl http://localhost:8000/v1/response \
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:8000/v1",
-    api_key="dangbei-token",
+    base_url="http://localhost:8999/v1",
+    api_key="your-secret-key",  # 对应 .env 中的 API_KEY，未配置则随意填
 )
 
 # 默认开启联网+深度思考
@@ -169,8 +170,20 @@ r2 = client.chat.completions.create(
 | `HOST` | `0.0.0.0` | 监听地址 |
 | `PORT` | `8000` | 监听端口 |
 | `DEFAULT_MODEL` | `deepseek-v3` | 默认模型 |
+| `API_KEY` | (空) | API 鉴权密钥，留空则不校验 |
 | `DANGBEI_TOKEN` | (空) | 登录 token，匿名模式留空 |
 | `DEFAULT_USER_ACTION` | `online,deep` | 默认行为（无后缀模型时生效） |
+
+### API Key 鉴权
+
+设置 `API_KEY` 后，所有请求必须携带 `Authorization: Bearer <key>` 头，完全兼容 OpenAI SDK 的 `api_key` 参数：
+
+```bash
+# 不设置 API_KEY（默认）→ 免验证，任意 api_key 均可
+# 设置 API_KEY=my-secret → 必须携带正确 key
+curl http://localhost:8999/v1/models \
+  -H "Authorization: Bearer my-secret"
+```
 
 ## 架构
 

@@ -9,6 +9,10 @@ PORT = int(os.getenv("PORT", "8000"))
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "deepseek-v3")
 DANGBEI_TOKEN = os.getenv("DANGBEI_TOKEN", "")  # empty = anonymous mode
 
+# API Key 鉴权（可选，留空则不校验）
+# 设置后客户端必须带 Authorization: Bearer <API_KEY> 才能访问
+API_KEY = os.getenv("API_KEY", "")
+
 # 默认开启联网搜索 + 深度思考（模型支持时自动生效）
 DEFAULT_USER_ACTION = os.getenv("DEFAULT_USER_ACTION", "online,deep")
 
