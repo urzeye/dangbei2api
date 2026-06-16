@@ -55,12 +55,14 @@ async def chat_sse(
     model: str = "deepseek-v3",
     user_action: str = "",
     files: list = None,
-) -> httpx.AsyncClient:
+) -> httpx.Response:
     """
-    Initiate a streaming chat and return the httpx client for SSE iteration.
+    发起流式聊天请求，返回 httpx.Response。
 
-    Returns the httpx.AsyncClient (still open) so the caller can iterate
-    over aiter_lines(). Caller MUST close the client.
+    调用方通过 response.aiter_lines() 迭代 SSE 行，
+    用完后必须 await response.aclose() 关闭底层连接。
+
+    注意：client 通过 response._client 挂载，调用方用完后需 await response._client.aclose()。
     """
     url = f"{DANGBEI_BASE_URL}/ai-search/chatApi/v2/chat"
     body = {
@@ -89,11 +91,14 @@ async def chat_sse(
     headers = _make_headers()
     headers["Accept"] = "text/event-stream"
     client = httpx.AsyncClient(timeout=300)
-    await client.send(
+    response = await client.send(
         client.build_request("POST", url, json=body, headers=headers),
         stream=True,
     )
-    return client
+    response.raise_for_status()
+    # 将 client 挂到 response 上，调用方用完需关闭
+    response._client = client
+    return response
 
 
 async def get_model_list() -> list[dict]:

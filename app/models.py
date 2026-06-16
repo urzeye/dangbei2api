@@ -1,62 +1,196 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List, Literal
+"""
+Pydantic models — 完整兼容 OpenAI /v1/chat/completions 和 /v1/response 协议。
 
+当贝专有参数通过标准 OpenAI 字段承载：
+  - userAction (online/deep): 模型名后缀，如 deepseek-v3-online-deep
+  - 会话保持: user 字段（相同 user 值复用同一 conversationId）
+  - /v1/response 多轮: previous_response_id（标准字段）
+"""
+
+from __future__ import annotations
+
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
+
+# ============================================================
+# 通用
+# ============================================================
+
+class FunctionDef(BaseModel):
+    name: str
+    description: str | None = None
+    parameters: dict[str, Any] | None = None  # JSON Schema
+    strict: bool | None = None
+
+
+class ToolDef(BaseModel):
+    type: Literal["function"] = "function"
+    function: FunctionDef
+
+
+class ToolCall(BaseModel):
+    id: str
+    type: Literal["function"] = "function"
+    function: "ToolCallFunction"
+
+
+class ToolCallFunction(BaseModel):
+    name: str
+    arguments: str  # JSON 字符串
+
+
+# ============================================================
+# /v1/chat/completions — 请求
+# ============================================================
 
 class Message(BaseModel):
-    role: Literal["system", "user", "assistant"]
-    content: str
+    """单条消息，兼容 system / user / assistant / tool 四种角色。"""
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str | list[dict[str, Any]] | None = None
+    name: str | None = None
+    tool_calls: list[ToolCall] | None = None
+    tool_call_id: str | None = None
 
 
-# --- OpenAI /chat/completions ---
+class ResponseFormat(BaseModel):
+    type: Literal["text", "json_object", "json_schema"] = "text"
+    json_schema: dict[str, Any] | None = None
+
+
+class StreamOptions(BaseModel):
+    include_usage: bool = False
+
 
 class ChatCompletionRequest(BaseModel):
+    """OpenAI /v1/chat/completions 完整请求模型。"""
     model: str = "deepseek-v3"
-    messages: List[Message]
+    messages: list[Message]
+    frequency_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    logit_bias: dict[str, float] | None = None
+    logprobs: bool | None = None
+    max_completion_tokens: int | None = None
+    max_tokens: int | None = None
+    n: int | None = Field(default=None, ge=1)
+    parallel_tool_calls: bool | None = None
+    presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
+    response_format: ResponseFormat | None = None
+    seed: int | None = None
+    service_tier: Literal["auto", "default"] | None = None
+    stop: str | list[str] | None = None
     stream: bool = False
-    temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
-    top_p: Optional[float] = None
-    # Dangbei-specific extensions
-    user_action: Optional[str] = Field(
-        default=None,
-        description="Comma-separated: 'online', 'deep', 'online,deep'"
-    )
+    stream_options: StreamOptions | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
+    tools: list[ToolDef] | None = None
+    tool_choice: str | dict[str, Any] | None = None
+    user: str | None = None
 
 
-# --- OpenAI Response API /v1/response ---
+# ============================================================
+# /v1/chat/completions — 响应
+# ============================================================
+
+class ChatChoice(BaseModel):
+    index: int
+    message: Message
+    finish_reason: Literal["stop", "length", "tool_calls", "content_filter"] | None = None
+    logprobs: Any | None = None
+
+
+class Usage(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+class ChatCompletionResponse(BaseModel):
+    id: str
+    object: Literal["chat.completion"] = "chat.completion"
+    created: int
+    model: str
+    choices: list[ChatChoice]
+    usage: Usage = Field(default_factory=Usage)
+    system_fingerprint: str | None = None
+    service_tier: str | None = None
+
+
+# ============================================================
+# /v1/response — 请求
+# ============================================================
 
 class ResponseInputItem(BaseModel):
-    role: Literal["user", "assistant", "system"]
+    """Response API 的 input 数组元素。"""
+    role: Literal["user", "assistant", "system", "developer"]
     content: str
 
 
 class ResponseRequest(BaseModel):
+    """OpenAI /v1/response 完整请求模型。"""
     model: str = "deepseek-v3"
-    input: List[ResponseInputItem]
+    input: list[ResponseInputItem]
+    instructions: str | None = None
+    max_output_tokens: int | None = None
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
     stream: bool = False
-    instructions: Optional[str] = None
-    # Dangbei-specific extensions
-    user_action: Optional[str] = Field(
-        default=None,
-        description="Comma-separated: 'online', 'deep', 'online,deep'"
-    )
+    tools: list[ToolDef] | None = None
+    tool_choice: str | dict[str, Any] | None = None
+    previous_response_id: str | None = None
+    user: str | None = None
 
 
-# --- Model list ---
+# ============================================================
+# /v1/response — 响应
+# ============================================================
 
-class ModelOption(BaseModel):
-    title: str
-    value: str
-    disable: bool
-    selected: bool
+class OutputTextContent(BaseModel):
+    type: Literal["output_text"] = "output_text"
+    text: str
 
+
+class ResponseOutputItem(BaseModel):
+    id: str
+    object: Literal["realtime.item"] = "realtime.item"
+    type: Literal["message"] = "message"
+    status: Literal["completed", "in_progress"] = "completed"
+    role: Literal["assistant"] = "assistant"
+    content: list[OutputTextContent] = Field(default_factory=list)
+
+
+class ResponseUsage(BaseModel):
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+
+
+class ResponseResponse(BaseModel):
+    id: str
+    object: Literal["response"] = "response"
+    created_at: int
+    status: Literal["completed", "failed", "in_progress"] = "completed"
+    model: str
+    output: list[ResponseOutputItem] = Field(default_factory=list)
+    usage: ResponseUsage = Field(default_factory=ResponseUsage)
+    previous_response_id: str | None = None
+    truncation: str = "disabled"
+    incomplete_details: str | None = None
+    parallel_tool_calls: bool = True
+
+
+# ============================================================
+# /v1/models
+# ============================================================
 
 class ModelInfo(BaseModel):
     id: str
     object: str = "model"
+    created: int = 1700000000
     owned_by: str = "dangbei"
 
 
 class ModelListResponse(BaseModel):
     object: str = "list"
-    data: List[ModelInfo]
+    data: list[ModelInfo]
+

@@ -4,10 +4,12 @@
 
 ## 功能
 
-- ✅ `/chat/completions` — OpenAI Chat Completions 格式（流式 + 非流式）
+- ✅ `/v1/chat/completions` — OpenAI Chat Completions 格式（流式 + 非流式）
 - ✅ `/v1/response` — OpenAI Response API 格式（流式 + 非流式）
-- ✅ `/v1/models` — 模型列表
+- ✅ `/v1/models` — 模型列表（自动追加功能变体）
 - ✅ 支持联网搜索 (`online`) 和深度思考 (`deep`)
+- ✅ **多轮对话**：通过标准 `user` 字段保持会话上下文
+- ✅ **零自定义 Header**：完全使用 OpenAI 标准协议字段
 - ✅ 匿名免登模式（自动换 deviceid 绕过配额限制）
 - ⚠️ 文件上传需配置登录 token
 
@@ -29,41 +31,76 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 ## API 使用
 
-### Chat Completions
+> **核心设计**：当贝专有参数通过标准 OpenAI 字段承载，无需任何自定义 Header。
+> - `userAction` → 模型名后缀（如 `deepseek-v3-online-deep`）
+> - 会话保持 → `user` 字段（相同值复用同一会话）
+> - 多轮关联 → `previous_response_id`（标准字段）
+
+### Chat Completions（基础）
 
 ```bash
-curl http://localhost:8000/chat/completions \
+curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-v3",
+    "model": "deepseek-v3-online-deep",
     "messages": [{"role": "user", "content": "你好"}],
     "stream": false
   }'
 ```
 
-### 联网搜索
+### 模型功能变体
+
+通过模型名后缀控制联网搜索和深度思考，无需额外参数：
+
+| 请求模型名 | 效果 |
+|-----------|------|
+| `deepseek-v3-online-deep` | 联网搜索 + 深度思考（默认推荐） |
+| `deepseek-v3-online` | 仅联网搜索 |
+| `deepseek-v3-deep` | 仅深度思考 |
+| `deepseek-v3-basic` | 基础模型，无联网无深度思考 |
+| `deepseek-v3` | 等同于 `-online-deep`（默认开启） |
 
 ```bash
-curl http://localhost:8000/chat/completions \
+# 仅联网搜索
+curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "glm-5",
+    "model": "glm-5-online",
     "messages": [{"role": "user", "content": "今天天气怎么样"}],
-    "stream": true,
-    "user_action": "online"
+    "stream": true
+  }'
+
+# 深度思考 + 联网
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "glm-5-online-deep",
+    "messages": [{"role": "user", "content": "三体讲的是什么"}],
+    "stream": true
   }'
 ```
 
-### 深度思考 + 联网
+### 多轮对话
+
+通过标准 `user` 字段保持会话上下文，相同 `user` 值自动复用同一会话：
 
 ```bash
-curl http://localhost:8000/chat/completions \
+# 第一轮
+curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "glm-5",
-    "messages": [{"role": "user", "content": "三体讲的是什么"}],
-    "stream": true,
-    "user_action": "online,deep"
+    "model": "deepseek-v3-online-deep",
+    "messages": [{"role": "user", "content": "我叫小明"}],
+    "user": "alice"
+  }'
+
+# 第二轮 — 相同 user，自动记住上下文
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v3-online-deep",
+    "messages": [{"role": "user", "content": "我叫什么名字？"}],
+    "user": "alice"
   }'
 ```
 
@@ -73,10 +110,36 @@ curl http://localhost:8000/chat/completions \
 curl http://localhost:8000/v1/response \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-v3",
+    "model": "deepseek-v3-online-deep",
     "input": [{"role": "user", "content": "你好"}],
     "stream": false
   }'
+```
+
+### 标准 OpenAI SDK 调用
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="dangbei-token",
+)
+
+# 默认开启联网+深度思考
+response = client.chat.completions.create(
+    model="deepseek-v3-online-deep",
+    messages=[{"role": "user", "content": "今天天气怎么样？"}],
+    user="alice",  # 相同 user 保持会话
+    stream=True,
+)
+
+# 多轮对话 — 相同 user，自动复用会话
+r2 = client.chat.completions.create(
+    model="deepseek-v3-online-deep",
+    messages=[{"role": "user", "content": "刚才说了什么？"}],
+    user="alice",
+)
 ```
 
 ## 可用模型
@@ -94,6 +157,8 @@ curl http://localhost:8000/v1/response \
 | `doubao-thinking` | 豆包-1.5-thinking-pro | ✓ | ✓ |
 | `ernie-4.5-turbo-32k` | 文心4.5 | ✗ | ✓ |
 
+> `/v1/models` 会自动为每个模型追加 `-online-deep`、`-online`、`-deep`、`-basic` 变体。
+
 ## 配置说明
 
 | 环境变量 | 默认值 | 说明 |
@@ -103,21 +168,22 @@ curl http://localhost:8000/v1/response \
 | `PORT` | `8000` | 监听端口 |
 | `DEFAULT_MODEL` | `deepseek-v3` | 默认模型 |
 | `DANGBEI_TOKEN` | (空) | 登录 token，匿名模式留空 |
+| `DEFAULT_USER_ACTION` | `online,deep` | 默认行为（无后缀模型时生效） |
 
 ## 架构
 
 ```
-用户请求 (OpenAI 格式)
+用户请求 (OpenAI 标准格式，零自定义 Header)
     │
     ▼
-app/routes.py          ← FastAPI 路由，参数校验
-    │
+app/routes.py          ← FastAPI 路由，模型名后缀解析 → userAction
+    │                     user 字段 → 会话映射，previous_response_id → 多轮关联
     ▼
 app/dangbei_client.py  ← 调用当贝 API（创建会话 → 生成 ID → SSE 聊天）
     │
     ▼
 app/converters.py      ← SSE 事件 → OpenAI / Response 格式转换
-    │
+    │                     search_card 注入、token 用量估算
     ▼
 用户响应 (OpenAI 格式 SSE / JSON)
 ```
@@ -127,4 +193,4 @@ app/converters.py      ← SSE 事件 → OpenAI / Response 格式转换
 - **匿名模式**：每次请求自动换 deviceid，不支持文件上传
 - **登录模式**：配置 `DANGBEI_TOKEN` 后可上传文件（需额外实现 OSS 上传链路）
 - **深度思考**：匿名模式下思考过程不单独流式输出，仅返回最终答案
-- **会话隔离**：每次 `/chat/completions` 请求创建新会话，不支持多轮对话上下文
+- **会话存储**：`user → conversationId` 映射存储在内存中，服务重启后丢失

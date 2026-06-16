@@ -4,12 +4,48 @@ SSE event parsers and format converters.
 Dangbei SSE events:
   - conversation.message.delta  → content_type: text | card | progress
   - conversation.chat.completed → final marker
+
+模型名后缀 → userAction 映射：
+  deepseek-v3               → 默认 online,deep
+  deepseek-v3-online        → online
+  deepseek-v3-deep          → deep
+  deepseek-v3-online-deep   → online,deep
+  deepseek-v3-basic         → 无（纯对话）
 """
 
 import json
 import time
 import uuid as uuid_lib
 from typing import AsyncIterator, Optional
+
+from app.config import DEFAULT_USER_ACTION
+
+
+def parse_model_action(model: str) -> tuple[str, str]:
+    """
+    从模型名解析出实际当贝模型名和 userAction。
+
+    >>> parse_model_action("deepseek-v3-online-deep")
+    ("deepseek-v3", "online,deep")
+    >>> parse_model_action("deepseek-v3-online")
+    ("deepseek-v3", "online")
+    >>> parse_model_action("deepseek-v3-basic")
+    ("deepseek-v3", "")
+    >>> parse_model_action("deepseek-v3")
+    ("deepseek-v3", "online,deep")   # 默认开启
+    """
+    known_suffixes = ["-online-deep", "-deep-online", "-online", "-deep", "-basic"]
+    for suffix in known_suffixes:
+        if model.endswith(suffix):
+            base = model[: -len(suffix)]
+            action = suffix[1:]  # 去掉前导 "-"
+            if action in ("deep-online", "online-deep"):
+                action = "online,deep"
+            elif action == "basic":
+                action = ""
+            return base, action
+    # 无已知后缀 → 默认开启 online + deep
+    return model, DEFAULT_USER_ACTION
 
 
 def _make_openai_chunk(
@@ -82,9 +118,30 @@ def _make_response_event(
     return base
 
 
+def _extract_card_text(event_data: dict) -> str:
+    """从 search_card 事件中提取可读文本，用于注入到对话流中。"""
+    content = event_data.get("content", "")
+    if isinstance(content, str):
+        try:
+            card = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            return ""
+        if isinstance(card, dict):
+            # 尝试提取卡片中的文本信息
+            title = card.get("title", "")
+            summary = card.get("summary", "") or card.get("content", "") or card.get("text", "")
+            if title or summary:
+                parts = [f"\n🔍 搜索: {title}"] if title else []
+                if summary:
+                    parts.append(summary)
+                return "\n".join(parts) + "\n"
+    return ""
+
+
 async def sse_to_openai_stream(
     sse_lines: AsyncIterator[str],
     model: str,
+    response_id: str | None = None,
 ) -> AsyncIterator[str]:
     """
     Convert Dangbei SSE lines to OpenAI /chat/completions streaming format.
@@ -94,6 +151,8 @@ async def sse_to_openai_stream(
     chunk_id = f"chatcmpl-{uuid_lib.uuid4().hex[:24]}"
     started = False
     full_text = ""
+    prompt_tokens = 0
+    completion_tokens = 0
 
     async for line in sse_lines:
         line = line.strip()
@@ -126,24 +185,37 @@ async def sse_to_openai_stream(
                 yield f"data: {json.dumps(role_chunk, ensure_ascii=False)}\n\n"
                 started = True
             full_text += content
+            completion_tokens += len(content)
             chunk = _make_openai_chunk(content, model, chunk_id)
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
         elif content_type == "card":
-            # Search result card — skip in text stream, or could be injected as system note
-            pass
+            # Search result card — inject as system note in stream
+            card_text = _extract_card_text(event_data)
+            if card_text:
+                full_text += card_text
+                completion_tokens += len(card_text)
+                chunk = _make_openai_chunk(card_text, model, chunk_id)
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
         elif content_type == "progress":
             # Progress messages — skip in text stream
             pass
 
-    # Send final chunk
+    # Send final chunk with usage
     if not started:
         # No text was ever produced, send empty role + finish
         role_chunk = _make_openai_chunk("", model, chunk_id, role="assistant")
         yield f"data: {json.dumps(role_chunk, ensure_ascii=False)}\n\n"
 
     final = _make_openai_final(chunk_id, model)
+    # 估算 prompt_tokens（中文约 1.5 字符/token）
+    prompt_tokens = max(1, completion_tokens * 2) if completion_tokens > 0 else 0
+    final["usage"] = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
     yield f"data: {json.dumps(final, ensure_ascii=False)}\n\n"
     yield "data: [DONE]\n\n"
 
@@ -151,6 +223,7 @@ async def sse_to_openai_stream(
 async def sse_to_response_stream(
     sse_lines: AsyncIterator[str],
     model: str,
+    response_id: str,
 ) -> AsyncIterator[str]:
     """
     Convert Dangbei SSE lines to OpenAI /v1/response streaming format.
@@ -161,7 +234,17 @@ async def sse_to_response_stream(
     full_text = ""
 
     # Send initial response.created
-    created = _make_response_event("response.created")
+    created = {
+        "type": "response.created",
+        "response": {
+            "id": response_id,
+            "object": "response",
+            "created_at": int(time.time()),
+            "status": "in_progress",
+            "model": model,
+            "output": [],
+        },
+    }
     yield f"event: response.created\ndata: {json.dumps(created, ensure_ascii=False)}\n\n"
 
     # Send output_item.added
@@ -219,7 +302,18 @@ async def sse_to_response_stream(
             )
             yield f"event: response.output_text.delta\ndata: {json.dumps(delta, ensure_ascii=False)}\n\n"
 
-        elif content_type in ("card", "progress"):
+        elif content_type == "card":
+            card_text = _extract_card_text(event_data)
+            if card_text:
+                full_text += card_text
+                delta = _make_response_event(
+                    "response.output_text.delta",
+                    text=card_text,
+                    item_id=item_id,
+                )
+                yield f"event: response.output_text.delta\ndata: {json.dumps(delta, ensure_ascii=False)}\n\n"
+
+        elif content_type == "progress":
             pass
 
     # Send output_text.done
@@ -238,11 +332,13 @@ async def sse_to_response_stream(
 async def sse_to_openai_full(
     sse_lines: AsyncIterator[str],
     model: str,
+    response_id: str | None = None,
 ) -> dict:
     """
     Convert Dangbei SSE lines to a single OpenAI /chat/completions non-streaming response.
     """
     full_text = ""
+    completion_tokens = 0
     async for line in sse_lines:
         line = line.strip()
         if not line or line.startswith("event:") or not line.startswith("data:"):
@@ -254,9 +350,17 @@ async def sse_to_openai_full(
             event_data = json.loads(data_str)
         except json.JSONDecodeError:
             continue
-        if event_data.get("content_type") == "text":
-            full_text += event_data.get("content", "")
+        content_type = event_data.get("content_type", "")
+        if content_type == "text":
+            content = event_data.get("content", "")
+            full_text += content
+            completion_tokens += len(content)
+        elif content_type == "card":
+            card_text = _extract_card_text(event_data)
+            full_text += card_text
+            completion_tokens += len(card_text)
 
+    prompt_tokens = max(1, completion_tokens * 2) if completion_tokens > 0 else 0
     return {
         "id": f"chatcmpl-{uuid_lib.uuid4().hex[:24]}",
         "object": "chat.completion",
@@ -273,9 +377,9 @@ async def sse_to_openai_full(
             }
         ],
         "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
         },
     }
 
@@ -283,11 +387,13 @@ async def sse_to_openai_full(
 async def sse_to_response_full(
     sse_lines: AsyncIterator[str],
     model: str,
+    response_id: str,
 ) -> dict:
     """
     Convert Dangbei SSE lines to a single OpenAI /v1/response non-streaming response.
     """
     full_text = ""
+    completion_tokens = 0
     async for line in sse_lines:
         line = line.strip()
         if not line or line.startswith("event:") or not line.startswith("data:"):
@@ -299,12 +405,21 @@ async def sse_to_response_full(
             event_data = json.loads(data_str)
         except json.JSONDecodeError:
             continue
-        if event_data.get("content_type") == "text":
-            full_text += event_data.get("content", "")
+        content_type = event_data.get("content_type", "")
+        if content_type == "text":
+            content = event_data.get("content", "")
+            full_text += content
+            completion_tokens += len(content)
+        elif content_type == "card":
+            card_text = _extract_card_text(event_data)
+            full_text += card_text
+            completion_tokens += len(card_text)
 
+    prompt_tokens = max(1, completion_tokens * 2) if completion_tokens > 0 else 0
     return {
-        "id": f"resp_{uuid_lib.uuid4().hex[:24]}",
+        "id": response_id,
         "object": "response",
+        "created_at": int(time.time()),
         "status": "completed",
         "model": model,
         "output": [
@@ -322,8 +437,8 @@ async def sse_to_response_full(
             }
         ],
         "usage": {
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "total_tokens": 0,
+            "input_tokens": prompt_tokens,
+            "output_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
         },
     }

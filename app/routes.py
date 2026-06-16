@@ -1,93 +1,199 @@
 """
-Route handlers for /chat/completions and /v1/response endpoints.
+Route handlers — 完整兼容 OpenAI /v1/chat/completions 和 /v1/response 协议。
+
+当贝专有参数通过标准 OpenAI 字段承载（零自定义 Header）：
+  - userAction (online/deep): 模型名后缀，如 deepseek-v3-online-deep
+  - 会话保持: user 字段（相同 user 值复用同一 conversationId）
+  - /v1/response 多轮: previous_response_id（标准字段）
 """
+
+from __future__ import annotations
 
 import json
 import uuid as uuid_lib
+
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+
+from app import converters, dangbei_client
+from app.config import DEFAULT_MODEL
 from app.models import (
     ChatCompletionRequest,
-    ResponseRequest,
-    ModelListResponse,
+    Message,
     ModelInfo,
+    ModelListResponse,
+    ResponseRequest,
 )
-from app.config import DEFAULT_MODEL, DANGBEI_TOKEN
-from app import dangbei_client
-from app import converters
 
 router = APIRouter()
 
+# ---------------------------------------------------------------------------
+# 会话映射表（内存）
+#   user_store:      user 值 → conversation_id（用于 /v1/chat/completions）
+#   response_store:  response_id → conversation_id（用于 /v1/response）
+# ---------------------------------------------------------------------------
+user_store: dict[str, str] = {}          # user → conversation_id
+response_store: dict[str, str] = {}      # response_id → conversation_id
 
-# --- Helper: build user_action from request ---
 
-def _resolve_user_action(request_action: str | None, model_caps: dict | None = None) -> str:
-    """
-    Resolve user_action from request. If not provided, default to empty.
-    Could also intersect with model capabilities.
-    """
-    if request_action is not None:
-        return request_action
+# ============================================================
+# 辅助函数
+# ============================================================
+
+def _extract_user_question(messages: list[Message]) -> str:
+    """从 messages 数组中提取最后一条 user 消息的文本内容。"""
+    for m in reversed(messages):
+        if m.role == "user" and isinstance(m.content, str):
+            return m.content
     return ""
 
 
-# --- /v1/models ---
+def _parse_model_and_action(model: str) -> tuple[str, str]:
+    """
+    从模型名解析出实际当贝模型名和 userAction。
+
+    >>> _parse_model_and_action("deepseek-v3-online-deep")
+    ("deepseek-v3", "online,deep")
+    >>> _parse_model_and_action("deepseek-v3-online")
+    ("deepseek-v3", "online")
+    >>> _parse_model_and_action("deepseek-v3-deep")
+    ("deepseek-v3", "deep")
+    >>> _parse_model_and_action("deepseek-v3")
+    ("deepseek-v3", "online,deep")   # 默认开启联网+深度思考
+    """
+    known_suffixes = ["-online-deep", "-deep-online", "-online", "-deep", "-basic"]
+    for suffix in known_suffixes:
+        if model.endswith(suffix):
+            base = model[: -len(suffix)]
+            action = suffix[1:]  # 去掉前导 "-"
+            if action in ("deep-online", "online-deep"):
+                action = "online,deep"
+            elif action == "basic":
+                action = ""
+            return base, action
+    # 无已知后缀 → 默认开启 online + deep
+    return model, "online,deep"
+
+
+async def _get_or_create_conversation(user: str | None) -> str:
+    """
+    基于 user 字段获取或创建会话。
+
+    - user 为 None 或空字符串 → 每次创建新会话（无状态模式）
+    - user 有值 → 查找 user_store，存在则复用，不存在则创建并存入
+    """
+    if not user:
+        return await dangbei_client.create_conversation()
+
+    if user in user_store:
+        return user_store[user]
+
+    conversation_id = await dangbei_client.create_conversation()
+    user_store[user] = conversation_id
+    return conversation_id
+
+
+async def _resolve_conversation_for_response(
+    previous_response_id: str | None,
+    user: str | None,
+) -> tuple[str, bool]:
+    """
+    为 /v1/response 解析 conversation_id。
+
+    优先级：previous_response_id > user > 新建
+
+    返回 (conversation_id, is_new)。
+    """
+    # 1. 通过 previous_response_id 查找
+    if previous_response_id and previous_response_id in response_store:
+        return response_store[previous_response_id], False
+
+    # 2. 通过 user 查找
+    if user and user in user_store:
+        return user_store[user], False
+
+    # 3. 新建会话
+    conversation_id = await dangbei_client.create_conversation()
+    if user:
+        user_store[user] = conversation_id
+    return conversation_id, True
+
+
+# ============================================================
+# /v1/models
+# ============================================================
 
 @router.get("/v1/models")
 async def list_models():
-    """List available Dangbei models in OpenAI format."""
+    """
+    列出当贝可用模型（OpenAI 格式）。
+
+    自动为每个模型追加变体，默认开启联网搜索和深度思考。
+    """
     try:
         models = await dangbei_client.get_model_list()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Failed to fetch models: {e}")
+        raise HTTPException(status_code=502, detail=f"获取模型列表失败: {e}")
 
-    data = []
+    data: list[ModelInfo] = []
     for m in models:
-        data.append(ModelInfo(id=m["value"]))
+        model_id = m["value"]
+        # 基础模型
+        data.append(ModelInfo(id=model_id))
+        # 追加变体
+        data.append(ModelInfo(id=f"{model_id}-online-deep"))
+        data.append(ModelInfo(id=f"{model_id}-online"))
+        data.append(ModelInfo(id=f"{model_id}-deep"))
+        data.append(ModelInfo(id=f"{model_id}-basic"))
+
     return ModelListResponse(data=data)
 
 
-# --- /chat/completions ---
+# ============================================================
+# /v1/chat/completions
+# ============================================================
 
-@router.post("/chat/completions")
+@router.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest):
     """
-    OpenAI-compatible /chat/completions endpoint.
-    Supports streaming (SSE) and non-streaming modes.
+    OpenAI 兼容 /v1/chat/completions 端点。
+
+    支持流式 (SSE) 和非流式。
+    - 模型名后缀控制 userAction：deepseek-v3-online-deep → 联网+深度思考
+    - user 字段控制会话保持：相同 user 值复用同一 conversationId
+    - 零自定义 Header
     """
-    # Extract user message
-    user_messages = [m for m in req.messages if m.role == "user"]
-    if not user_messages:
-        raise HTTPException(status_code=400, detail="At least one user message is required")
-    question = user_messages[-1].content
+    question = _extract_user_question(req.messages)
+    if not question:
+        raise HTTPException(status_code=400, detail="至少需要一条 user 消息")
 
+    # 从模型名解析 base_model 和 user_action
     model = req.model or DEFAULT_MODEL
-    user_action = _resolve_user_action(req.user_action)
+    base_model, user_action = _parse_model_and_action(model)
 
-    # Check file upload permission
-    if not DANGBEI_TOKEN:
-        # Anonymous mode: no file upload support
-        pass
-
+    # 基于 user 字段获取或创建会话
     try:
-        conversation_id = await dangbei_client.create_conversation()
+        conversation_id = await _get_or_create_conversation(req.user)
         chat_id = await dangbei_client.generate_id()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Dangbei API error: {e}")
+        raise HTTPException(status_code=502, detail=f"当贝 API 错误: {e}")
 
+    # ------------------------------------------------------------------
+    # 流式响应
+    # ------------------------------------------------------------------
     if req.stream:
         async def event_stream():
-            client = None
+            response = None
             try:
-                client = await dangbei_client.chat_sse(
+                response = await dangbei_client.chat_sse(
                     conversation_id=conversation_id,
                     chat_id=chat_id,
                     question=question,
-                    model=model,
+                    model=base_model,
                     user_action=user_action,
                 )
                 async for chunk in converters.sse_to_openai_stream(
-                    client.aiter_lines(), model
+                    response.aiter_lines(), model
                 ):
                     yield chunk
             except Exception as e:
@@ -97,8 +203,10 @@ async def chat_completions(req: ChatCompletionRequest):
                 yield f"data: {error_chunk}\n\n"
                 yield "data: [DONE]\n\n"
             finally:
-                if client:
-                    await client.aclose()
+                if response is not None:
+                    await response.aclose()
+                    if hasattr(response, '_client'):
+                        await response._client.aclose()
 
         return StreamingResponse(
             event_stream(),
@@ -109,62 +217,87 @@ async def chat_completions(req: ChatCompletionRequest):
                 "X-Accel-Buffering": "no",
             },
         )
-    else:
-        # Non-streaming
-        client = None
-        try:
-            client = await dangbei_client.chat_sse(
-                conversation_id=conversation_id,
-                chat_id=chat_id,
-                question=question,
-                model=model,
-                user_action=user_action,
-            )
-            result = await converters.sse_to_openai_full(client.aiter_lines(), model)
-            return JSONResponse(content=result)
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Dangbei API error: {e}")
-        finally:
-            if client:
-                await client.aclose()
+
+    # ------------------------------------------------------------------
+    # 非流式响应
+    # ------------------------------------------------------------------
+    response = None
+    try:
+        response = await dangbei_client.chat_sse(
+            conversation_id=conversation_id,
+            chat_id=chat_id,
+            question=question,
+            model=base_model,
+            user_action=user_action,
+        )
+        result = await converters.sse_to_openai_full(
+            response.aiter_lines(), model
+        )
+        # 在响应中附加 conversation_id（通过 _conversation_id 内部字段）
+        result["_conversation_id"] = conversation_id
+        return JSONResponse(content=result)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"当贝 API 错误: {e}")
+    finally:
+        if response is not None:
+            await response.aclose()
+            if hasattr(response, '_client'):
+                await response._client.aclose()
 
 
-# --- /v1/response ---
+# ============================================================
+# /v1/response
+# ============================================================
 
 @router.post("/v1/response")
 async def response_api(req: ResponseRequest):
     """
-    OpenAI-compatible /v1/response endpoint.
-    Supports streaming (SSE) and non-streaming modes.
+    OpenAI 兼容 /v1/response 端点。
+
+    支持流式 (SSE) 和非流式。
+    - 模型名后缀控制 userAction
+    - previous_response_id 标准字段支持多轮对话
+    - user 字段支持会话保持
+    - 零自定义 Header
     """
-    # Extract user input
     user_inputs = [item for item in req.input if item.role == "user"]
     if not user_inputs:
-        raise HTTPException(status_code=400, detail="At least one user input is required")
+        raise HTTPException(status_code=400, detail="至少需要一条 user 输入")
     question = user_inputs[-1].content
 
+    # 从模型名解析 base_model 和 user_action
     model = req.model or DEFAULT_MODEL
-    user_action = _resolve_user_action(req.user_action)
+    base_model, user_action = _parse_model_and_action(model)
 
+    # 解析会话
     try:
-        conversation_id = await dangbei_client.create_conversation()
+        conversation_id, is_new = await _resolve_conversation_for_response(
+            req.previous_response_id, req.user
+        )
         chat_id = await dangbei_client.generate_id()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Dangbei API error: {e}")
+        raise HTTPException(status_code=502, detail=f"当贝 API 错误: {e}")
 
+    # 生成 response_id 并建立映射
+    response_id = f"resp_{uuid_lib.uuid4().hex[:24]}"
+    response_store[response_id] = conversation_id
+
+    # ------------------------------------------------------------------
+    # 流式响应
+    # ------------------------------------------------------------------
     if req.stream:
         async def event_stream():
-            client = None
+            resp = None
             try:
-                client = await dangbei_client.chat_sse(
+                resp = await dangbei_client.chat_sse(
                     conversation_id=conversation_id,
                     chat_id=chat_id,
                     question=question,
-                    model=model,
+                    model=base_model,
                     user_action=user_action,
                 )
                 async for chunk in converters.sse_to_response_stream(
-                    client.aiter_lines(), model
+                    resp.aiter_lines(), model, response_id
                 ):
                     yield chunk
             except Exception as e:
@@ -174,8 +307,10 @@ async def response_api(req: ResponseRequest):
                 }, ensure_ascii=False)
                 yield f"event: error\ndata: {error_event}\n\n"
             finally:
-                if client:
-                    await client.aclose()
+                if resp is not None:
+                    await resp.aclose()
+                    if hasattr(resp, '_client'):
+                        await resp._client.aclose()
 
         return StreamingResponse(
             event_stream(),
@@ -186,20 +321,29 @@ async def response_api(req: ResponseRequest):
                 "X-Accel-Buffering": "no",
             },
         )
-    else:
-        client = None
-        try:
-            client = await dangbei_client.chat_sse(
-                conversation_id=conversation_id,
-                chat_id=chat_id,
-                question=question,
-                model=model,
-                user_action=user_action,
-            )
-            result = await converters.sse_to_response_full(client.aiter_lines(), model)
-            return JSONResponse(content=result)
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Dangbei API error: {e}")
-        finally:
-            if client:
-                await client.aclose()
+
+    # ------------------------------------------------------------------
+    # 非流式响应
+    # ------------------------------------------------------------------
+    resp = None
+    try:
+        resp = await dangbei_client.chat_sse(
+            conversation_id=conversation_id,
+            chat_id=chat_id,
+            question=question,
+            model=base_model,
+            user_action=user_action,
+        )
+        result = await converters.sse_to_response_full(
+            resp.aiter_lines(), model, response_id
+        )
+        result["_conversation_id"] = conversation_id
+        return JSONResponse(content=result)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"当贝 API 错误: {e}")
+    finally:
+        if resp is not None:
+            await resp.aclose()
+            if hasattr(resp, '_client'):
+                await resp._client.aclose()
+
