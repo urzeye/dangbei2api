@@ -5,10 +5,10 @@
 ## 功能
 
 - ✅ `/v1/chat/completions` — OpenAI Chat Completions 格式（流式 + 非流式）
-- ✅ `/v1/response` — OpenAI Response API 格式（流式 + 非流式）
+- ✅ `/v1/responses` — OpenAI Responses API 格式（流式 + 非流式）
 - ✅ `/v1/models` — 模型列表（自动追加功能变体）
 - ✅ 支持联网搜索 (`online`) 和深度思考 (`deep`)
-- ✅ **多轮对话**：通过标准 `user` 字段保持会话上下文
+- ✅ **多轮对话**：默认共享会话（开箱即用有记忆），通过标准 `user` 字段实现会话隔离
 - ✅ **零自定义 Header**：完全使用 OpenAI 标准协议字段
 - ✅ **API Key 鉴权**：可选 `Authorization: Bearer` 验证，完全兼容 OpenAI SDK
 - ✅ 匿名免登模式（自动换 deviceid 绕过配额限制）
@@ -83,34 +83,78 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-### 多轮对话
+### 多轮对话与会话隔离
 
-通过标准 `user` 字段保持会话上下文，相同 `user` 值自动复用同一会话：
+**默认行为**：不传 `user` 字段时，所有请求共享同一个默认会话，开箱即用有记忆。
+
+**会话隔离**：通过标准 `user` 字段为不同用户/对话创建独立会话，互不干扰。
+
+| 场景 | `user` 字段 | 行为 |
+|------|------------|------|
+| 不传 `user` | 空 | 共享默认会话（有记忆） |
+| 传 `user: "alice"` | alice | alice 独立会话（有记忆） |
+| 传 `user: "bob"` | bob | bob 独立会话（有记忆，与 alice 隔离） |
 
 ```bash
-# 第一轮
+# === 默认会话（不传 user，共享） ===
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "glm-5-online-deep",
+    "model": "deepseek-v3-basic",
     "messages": [{"role": "user", "content": "我叫小明"}],
-    "user": "alice"
+    "stream": false
   }'
 
-# 第二轮 — 相同 user，自动记住上下文
+# 第二轮 — 不传 user，复用默认会话，有记忆
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "glm-5-online-deep",
+    "model": "deepseek-v3-basic",
     "messages": [{"role": "user", "content": "我叫什么名字？"}],
-    "user": "alice"
+    "stream": false
   }'
+# → 回答：你叫小明 ✅
+
+# === 独立会话（传 user，隔离） ===
+# 会话 A
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v3-basic",
+    "messages": [{"role": "user", "content": "我叫小明"}],
+    "user": "alice",
+    "stream": false
+  }'
+
+# 会话 B — 不同 user，完全隔离
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v3-basic",
+    "messages": [{"role": "user", "content": "我叫什么名字？"}],
+    "user": "bob",
+    "stream": false
+  }'
+# → 回答：我不知道你的名字 ✅（隔离成功）
+
+# 会话 A 第二轮 — 相同 user，有记忆
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-v3-basic",
+    "messages": [{"role": "user", "content": "我叫什么名字？"}],
+    "user": "alice",
+    "stream": false
+  }'
+# → 回答：你叫小明 ✅
 ```
+
+> **注意**：会话存储在内存中，服务重启后所有会话丢失。同一 `user` 值始终映射到同一会话，如需同一用户开启多个独立对话，请使用不同的 `user` 值（如 `alice-work`、`alice-study`）。
 
 ### Response API
 
 ```bash
-curl http://localhost:8000/v1/response \
+curl http://localhost:8999/v1/responses \
   -H "Content-Type: application/json" \
   -d '{
     "model": "glm-5-online-deep",
@@ -129,19 +173,24 @@ client = OpenAI(
     api_key="your-secret-key",  # 对应 .env 中的 API_KEY，未配置则随意填
 )
 
-# 默认开启联网+深度思考
+# 默认共享会话（不传 user，开箱即用有记忆）
 response = client.chat.completions.create(
     model="glm-5-online-deep",
     messages=[{"role": "user", "content": "今天天气怎么样？"}],
-    user="alice",  # 相同 user 保持会话
     stream=True,
 )
 
-# 多轮对话 — 相同 user，自动复用会话
+# 多轮对话 — 不传 user，自动复用默认会话
 r2 = client.chat.completions.create(
     model="glm-5-online-deep",
     messages=[{"role": "user", "content": "刚才说了什么？"}],
-    user="alice",
+)
+
+# 会话隔离 — 传 user 为不同用户创建独立会话
+r3 = client.chat.completions.create(
+    model="glm-5-online-deep",
+    messages=[{"role": "user", "content": "你好"}],
+    user="alice",  # alice 独立会话
 )
 ```
 
