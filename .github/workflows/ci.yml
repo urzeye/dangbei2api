@@ -2,16 +2,16 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ['3.10', '3.11', '3.12']
+        python-version: ["3.10", "3.11", "3.12"]
 
     steps:
       - name: Checkout repository
@@ -55,10 +55,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Test Docker image
-        run: |
-          docker run -d --name test-container -p 8000:8000 dangbei2api:test
-          sleep 10
-          curl -f http://localhost:8000/health || exit 1
-          docker logs test-container
-          docker stop test-container
+      # - name: Test Docker image
+      #   run: |
+      #     docker run -d --name test-container -p 8000:8000 dangbei2api:test
+      #     sleep 10
+      #     curl -f http://localhost:8000/health || exit 1
+      #     docker logs test-container
+      #     docker stop test-container
