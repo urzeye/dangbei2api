@@ -42,8 +42,11 @@
 直接使用已构建好的镜像：
 
 ```bash
-# 拉取最新版本
+# 从 Docker Hub 拉取
 docker pull urzeye/dangbei2api:latest
+
+# 或从 GitHub Packages 拉取
+docker pull ghcr.io/urzeye/dangbei2api:latest
 
 # 运行容器（快速启动）
 docker run -d -p 8000:8000 --name dangbei2api urzeye/dangbei2api:latest
@@ -58,6 +61,10 @@ docker run -d -p 8000:8000 --name dangbei2api \
 # 查看健康状态
 curl http://localhost:8000/health
 ```
+
+支持的镜像仓库：
+- **Docker Hub**: `urzeye/dangbei2api`
+- **GitHub Packages**: `ghcr.io/urzeye/dangbei2api`
 
 支持的镜像标签：
 - `latest` - 最新稳定版
