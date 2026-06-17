@@ -49,12 +49,26 @@ class SessionStore(Protocol):
         """关闭存储"""
         ...
 
+    # Response ID 映射（用于 /v1/responses API）
+    async def get_response_conversation(self, response_id: str) -> str | None:
+        """通过 response_id 获取 conversation_id"""
+        ...
+
+    async def set_response_conversation(self, response_id: str, conversation_id: str) -> None:
+        """设置 response_id → conversation_id 映射"""
+        ...
+
+    async def clear_responses(self) -> int:
+        """清空所有 response 映射，返回清理数量"""
+        ...
+
 
 class MemorySessionStore:
     """内存会话存储"""
 
     def __init__(self):
         self._store: dict[str, tuple[str, float]] = {}
+        self._response_store: dict[str, str] = {}  # response_id → conversation_id
 
     async def get(self, user: str) -> str | None:
         """获取会话 ID"""
@@ -108,6 +122,21 @@ class MemorySessionStore:
         """关闭存储（内存模式无需操作）"""
         pass
 
+    # Response ID 映射
+    async def get_response_conversation(self, response_id: str) -> str | None:
+        """通过 response_id 获取 conversation_id"""
+        return self._response_store.get(response_id)
+
+    async def set_response_conversation(self, response_id: str, conversation_id: str) -> None:
+        """设置 response_id → conversation_id 映射"""
+        self._response_store[response_id] = conversation_id
+
+    async def clear_responses(self) -> int:
+        """清空所有 response 映射"""
+        count = len(self._response_store)
+        self._response_store.clear()
+        return count
+
 
 class SQLiteSessionStore:
     """SQLite 会话存储"""
@@ -124,6 +153,8 @@ class SQLiteSessionStore:
             os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
 
             self._db = await aiosqlite.connect(self.db_path)
+
+            # 创建会话表
             await self._db.execute("""
                 CREATE TABLE IF NOT EXISTS sessions (
                     user TEXT PRIMARY KEY,
@@ -134,6 +165,16 @@ class SQLiteSessionStore:
             await self._db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_last_access ON sessions(last_access)
             """)
+
+            # 创建 response 映射表
+            await self._db.execute("""
+                CREATE TABLE IF NOT EXISTS response_mappings (
+                    response_id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                )
+            """)
+
             await self._db.commit()
             logger.info("SQLite 会话存储已初始化", db_path=self.db_path)
 
@@ -225,6 +266,42 @@ class SQLiteSessionStore:
             await self._db.close()
             self._db = None
             logger.info("SQLite 连接已关闭")
+
+    # Response ID 映射
+    async def get_response_conversation(self, response_id: str) -> str | None:
+        """通过 response_id 获取 conversation_id"""
+        db = await self._ensure_db()
+        cursor = await db.execute(
+            "SELECT conversation_id FROM response_mappings WHERE response_id = ?",
+            (response_id,)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else None
+
+    async def set_response_conversation(self, response_id: str, conversation_id: str) -> None:
+        """设置 response_id → conversation_id 映射"""
+        db = await self._ensure_db()
+        await db.execute(
+            """
+            INSERT INTO response_mappings (response_id, conversation_id, created_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(response_id) DO UPDATE SET
+                conversation_id = excluded.conversation_id
+            """,
+            (response_id, conversation_id, time.time())
+        )
+        await db.commit()
+
+    async def clear_responses(self) -> int:
+        """清空所有 response 映射"""
+        db = await self._ensure_db()
+        cursor = await db.execute("SELECT COUNT(*) FROM response_mappings")
+        row = await cursor.fetchone()
+        count = row[0] if row else 0
+
+        await db.execute("DELETE FROM response_mappings")
+        await db.commit()
+        return count
 
 
 # 全局会话存储实例

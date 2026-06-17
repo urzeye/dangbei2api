@@ -1,6 +1,6 @@
 [project]
 name = "dangbei2api"
-version = "0.2.0"
+version = "0.2.1"
 description = "将当贝 AI 网页版能力封装为 OpenAI 兼容 API"
 requires-python = ">=3.10,<3.13"
 dependencies = [
@@ -13,6 +13,8 @@ dependencies = [
     "structlog>=24.0.0",
     "slowapi>=0.1.9",
     "aiosqlite>=0.19.0",
+    "tiktoken>=0.7.0",
+    "cachetools>=5.3.0",
 ]
 
 [project.scripts]

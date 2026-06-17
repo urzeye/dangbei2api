@@ -8,6 +8,7 @@ Dangbei2API - 优化版本。
 4. 生命周期管理（连接池、会话存储）
 5. 后台任务（定期清理过期会话）
 6. 限流中间件
+7. 请求追踪 ID 中间件
 """
 
 import asyncio
@@ -21,6 +22,7 @@ from slowapi.errors import RateLimitExceeded
 from app import dangbei_client
 from app.errors import global_exception_handler
 from app.logger import get_logger, setup_logging
+from app.middleware import RequestIDMiddleware
 from app.routes import limiter, router
 from app.session_store import close_session_store, get_session_store
 from app.settings import settings
@@ -52,7 +54,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     logger.info(
         "Dangbei2API 启动中",
-        version="0.2.0",
+        version="0.2.1",
         host=settings.host,
         port=settings.port,
         log_level=settings.log_level,
@@ -94,9 +96,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Dangbei2API",
     description="将当贝 AI (ai.dangbei.com) 网页版能力封装为 OpenAI 兼容 API",
-    version="0.2.0",
+    version="0.2.1",
     lifespan=lifespan,
 )
+
+# 请求追踪 ID 中间件（最先添加，确保所有请求都有追踪 ID）
+app.add_middleware(RequestIDMiddleware)
 
 # CORS 中间件
 app.add_middleware(
@@ -123,7 +128,7 @@ async def root():
     """根端点 - 服务信息"""
     return {
         "service": "Dangbei2API",
-        "version": "0.2.0",
+        "version": "0.2.1",
         "endpoints": {
             "/v1/chat/completions": "OpenAI chat completions (stream & non-stream)",
             "/v1/responses": "OpenAI Responses API (stream & non-stream)",

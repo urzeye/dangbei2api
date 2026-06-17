@@ -11,6 +11,8 @@ import time
 import uuid as uuid_lib
 from typing import AsyncIterator
 
+from app.token_counter import count_tokens, estimate_prompt_tokens
+
 
 def _make_openai_chunk(
     delta_content: str,
@@ -173,8 +175,9 @@ async def sse_to_openai_stream(
         yield f"data: {json.dumps(role_chunk, ensure_ascii=False)}\n\n"
 
     final = _make_openai_final(chunk_id, model)
-    # 估算 prompt_tokens（中文约 1.5 字符/token）
-    prompt_tokens = max(1, completion_tokens * 2) if completion_tokens > 0 else 0
+    # 使用 tiktoken 精确计算 token
+    completion_tokens = count_tokens(full_text)
+    prompt_tokens = estimate_prompt_tokens(completion_tokens)
     final["usage"] = {
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -302,7 +305,6 @@ async def sse_to_openai_full(
     Convert Dangbei SSE lines to a single OpenAI /chat/completions non-streaming response.
     """
     full_text = ""
-    completion_tokens = 0
     async for line in sse_lines:
         line = line.strip()
         if not line or line.startswith("event:") or not line.startswith("data:"):
@@ -318,13 +320,13 @@ async def sse_to_openai_full(
         if content_type == "text":
             content = event_data.get("content", "")
             full_text += content
-            completion_tokens += len(content)
         elif content_type == "card":
             card_text = _extract_card_text(event_data)
             full_text += card_text
-            completion_tokens += len(card_text)
 
-    prompt_tokens = max(1, completion_tokens * 2) if completion_tokens > 0 else 0
+    # 使用 tiktoken 精确计算 token
+    completion_tokens = count_tokens(full_text)
+    prompt_tokens = estimate_prompt_tokens(completion_tokens)
     return {
         "id": f"chatcmpl-{uuid_lib.uuid4().hex[:24]}",
         "object": "chat.completion",
@@ -357,7 +359,6 @@ async def sse_to_response_full(
     Convert Dangbei SSE lines to a single OpenAI /v1/response non-streaming response.
     """
     full_text = ""
-    completion_tokens = 0
     async for line in sse_lines:
         line = line.strip()
         if not line or line.startswith("event:") or not line.startswith("data:"):
@@ -373,13 +374,13 @@ async def sse_to_response_full(
         if content_type == "text":
             content = event_data.get("content", "")
             full_text += content
-            completion_tokens += len(content)
         elif content_type == "card":
             card_text = _extract_card_text(event_data)
             full_text += card_text
-            completion_tokens += len(card_text)
 
-    prompt_tokens = max(1, completion_tokens * 2) if completion_tokens > 0 else 0
+    # 使用 tiktoken 精确计算 token
+    output_tokens = count_tokens(full_text)
+    input_tokens = estimate_prompt_tokens(output_tokens)
     return {
         "id": response_id,
         "object": "response",
@@ -401,8 +402,8 @@ async def sse_to_response_full(
             }
         ],
         "usage": {
-            "input_tokens": prompt_tokens,
-            "output_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
         },
     }

@@ -2,20 +2,21 @@
 Route handlers - 优化版本。
 
 改进：
-1. 使用新的会话存储抽象
+1. 使用新的会话存储抽象（含 response_store）
 2. 使用 dangbei_client 的上下文管理器
 3. 添加限流保护
 4. 统一错误处理
 5. 添加健康检查
-6. 模型列表缓存
+6. 模型列表缓存（TTLCache）
 7. 消除重复代码
+8. 请求追踪 ID
 """
 
 import json
 import time
 import uuid as uuid_lib
-from functools import lru_cache
 
+from cachetools import TTLCache
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -25,6 +26,7 @@ from slowapi.util import get_remote_address
 from app import converters, dangbei_client
 from app.errors import DangbeiAPIError, validate_request
 from app.logger import get_logger
+from app.middleware import get_request_id
 from app.models import (
     ChatCompletionRequest,
     ModelInfo,
@@ -48,8 +50,8 @@ _security = HTTPBearer(auto_error=False)
 # 未提供 user 字段时的默认会话 key
 _DEFAULT_USER_KEY = "__default__"
 
-# Response API 会话映射（response_id → conversation_id）
-_response_store: dict[str, str] = {}
+# 模型列表缓存（TTLCache，自动过期）
+_model_cache = TTLCache(maxsize=1, ttl=settings.model_cache_ttl)
 
 
 def _verify_api_key(credentials: HTTPAuthorizationCredentials | None = Depends(_security)) -> None:
@@ -103,10 +105,11 @@ async def _resolve_conversation_for_response(
     store = await get_session_store()
 
     # 1. 通过 previous_response_id 查找
-    if previous_response_id and previous_response_id in _response_store:
-        conversation_id = _response_store[previous_response_id]
-        logger.debug("通过 response_id 复用会话", conversation_id=conversation_id)
-        return conversation_id, False
+    if previous_response_id:
+        conversation_id = await store.get_response_conversation(previous_response_id)
+        if conversation_id:
+            logger.debug("通过 response_id 复用会话", conversation_id=conversation_id)
+            return conversation_id, False
 
     # 2. 通过 user 查找（含默认 key）
     effective_user = user if user else _DEFAULT_USER_KEY
@@ -139,7 +142,7 @@ async def health_check():
     health_status = {
         "status": "healthy",
         "timestamp": int(time.time()),
-        "version": "0.2.0",
+        "version": "0.2.1",
     }
 
     # 检查当贝 API 连通性
@@ -170,10 +173,6 @@ async def health_check():
 # /v1/models
 # ============================================================
 
-# 模型列表缓存（避免频繁请求当贝 API）
-_model_cache: tuple[float, ModelListResponse] | None = None
-
-
 @router.get("/v1/models")
 async def list_models(_auth: None = Depends(_verify_api_key)):
     """
@@ -182,15 +181,11 @@ async def list_models(_auth: None = Depends(_verify_api_key)):
     根据 getChatModelConfig 返回的 option[].disable 精确追加功能变体。
     结果会缓存一段时间以提高性能。
     """
-    global _model_cache
-
-    # 检查缓存
-    now = time.time()
-    if _model_cache is not None:
-        cache_time, cached_response = _model_cache
-        if now - cache_time < settings.model_cache_ttl:
-            logger.debug("使用模型列表缓存")
-            return cached_response
+    # 检查缓存（使用 TTLCache，自动过期）
+    cache_key = "models"
+    if cache_key in _model_cache:
+        logger.debug("使用模型列表缓存")
+        return _model_cache[cache_key]
 
     # 获取最新模型列表
     try:
@@ -225,8 +220,8 @@ async def list_models(_auth: None = Depends(_verify_api_key)):
 
     response = ModelListResponse(data=data)
 
-    # 更新缓存
-    _model_cache = (now, response)
+    # 更新缓存（TTLCache 自动管理过期）
+    _model_cache[cache_key] = response
     logger.info("模型列表已缓存", count=len(data), ttl=settings.model_cache_ttl)
 
     return response
@@ -241,8 +236,7 @@ async def reset_all_conversations(_auth: None = Depends(_verify_api_key)):
     """清空所有会话，重新开始"""
     store = await get_session_store()
     user_count = await store.clear()
-    response_count = len(_response_store)
-    _response_store.clear()
+    response_count = await store.clear_responses()
 
     logger.info("清空所有会话", user_count=user_count, response_count=response_count)
 
@@ -328,6 +322,7 @@ async def chat_completions(
         user_action=user_action,
         stream=req.stream,
         user=req.user or _DEFAULT_USER_KEY,
+        request_id=get_request_id(),
     )
 
     # 流式响应
@@ -411,7 +406,8 @@ async def responses_api(
 
     # 生成 response_id 并建立映射
     response_id = f"resp_{uuid_lib.uuid4().hex[:24]}"
-    _response_store[response_id] = conversation_id
+    store = await get_session_store()
+    await store.set_response_conversation(response_id, conversation_id)
 
     logger.info(
         "处理 responses 请求",
@@ -420,6 +416,7 @@ async def responses_api(
         stream=req.stream,
         user=req.user or _DEFAULT_USER_KEY,
         is_new_conversation=is_new,
+        request_id=get_request_id(),
     )
 
     # 流式响应
