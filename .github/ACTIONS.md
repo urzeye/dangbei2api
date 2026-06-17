@@ -28,7 +28,9 @@
 
 **功能**:
 - 构建多架构镜像（amd64、arm64）
-- 推送到 Docker Hub
+- 同时推送到两个镜像仓库：
+  - **Docker Hub**: `urzeye/dangbei2api`
+  - **GitHub Packages**: `ghcr.io/urzeye/dangbei2api`
 - 自动生成镜像标签：
   - `v0.2.1`（完整版本号）
   - `v0.2`（次版本号）
@@ -64,6 +66,10 @@
 2. **DOCKERHUB_TOKEN**
    - Docker Hub Access Token（不是密码）
    - 获取方式: Docker Hub → Account Settings → Security → New Access Token
+
+### 自动配置（无需手动添加）
+
+- **GITHUB_TOKEN**: GitHub Actions 自动提供，用于推送到 GitHub Packages (ghcr.io)
 
 ### 获取 Docker Hub Token
 
@@ -142,6 +148,24 @@ docker pull urzeye/dangbei2api:0.2.1
 # 拉取次版本号（自动获取最新补丁版本）
 docker pull urzeye/dangbei2api:0.2
 ```
+
+### GitHub Packages (ghcr.io)
+
+```bash
+# 拉取最新版本
+docker pull ghcr.io/urzeye/dangbei2api:latest
+
+# 拉取指定版本
+docker pull ghcr.io/urzeye/dangbei2api:0.2.1
+
+# 拉取次版本号
+docker pull ghcr.io/urzeye/dangbei2api:0.2
+```
+
+**选择建议**:
+- 海外用户 → Docker Hub（网络更快）
+- 国内用户 → 两者都可以尝试（部分地区 GHCR 更快）
+- CI/CD 环境 → GitHub Packages（同一平台，更稳定）
 
 ### Docker Compose
 
