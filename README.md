@@ -1,5 +1,11 @@
 # Dangbei2API
 
+[![CI](https://github.com/urzeye/dangbei2api/actions/workflows/ci.yml/badge.svg)](https://github.com/urzeye/dangbei2api/actions/workflows/ci.yml)
+[![Docker Build](https://github.com/urzeye/dangbei2api/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/urzeye/dangbei2api/actions/workflows/docker-publish.yml)
+[![Docker Pulls](https://img.shields.io/docker/pulls/urzeye/dangbei2api)](https://hub.docker.com/r/urzeye/dangbei2api)
+[![Release](https://img.shields.io/github/v/release/urzeye/dangbei2api)](https://github.com/urzeye/dangbei2api/releases)
+[![License](https://img.shields.io/github/license/urzeye/dangbei2api)](LICENSE)
+
 将[当贝 AI](https://ai.dangbei.com/chat) 网页版能力封装为 OpenAI 兼容 API。
 
 > ⚠️ **免责声明**：本项目仅用于学习研究，严禁用于任何商业用途或违反当贝服务条款的行为。使用者须自行承担一切法律风险与责任。
@@ -31,11 +37,38 @@
 
 ## 快速开始
 
-### 方式 1：Docker Compose（推荐）
+### 方式 1：Docker Hub（最快）
+
+直接使用已构建好的镜像：
+
+```bash
+# 拉取最新版本
+docker pull urzeye/dangbei2api:latest
+
+# 运行容器（快速启动）
+docker run -d -p 8000:8000 --name dangbei2api urzeye/dangbei2api:latest
+
+# 运行容器（完整配置）
+docker run -d -p 8000:8000 --name dangbei2api \
+  -e API_KEY=your-secret-key \
+  -e USE_SQLITE_SESSION=true \
+  -v $(pwd)/data:/app/data \
+  urzeye/dangbei2api:0.2.1
+
+# 查看健康状态
+curl http://localhost:8000/health
+```
+
+支持的镜像标签：
+- `latest` - 最新稳定版
+- `0.2.1` - 指定版本（推荐生产环境）
+- `0.2` - 次版本号（自动获取最新补丁）
+
+### 方式 2：Docker Compose（推荐自建）
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/yourusername/dangbei2api.git
+git clone https://github.com/urzeye/dangbei2api.git
 cd dangbei2api
 
 # 2. 启动服务（默认端口 8000）
@@ -48,7 +81,7 @@ docker-compose logs -f
 docker-compose down
 ```
 
-### 方式 2：Docker
+### 方式 3：Docker 本地构建
 
 ```bash
 # 构建镜像
@@ -68,9 +101,7 @@ docker run -d -p 8000:8000 --name dangbei2api \
 curl http://localhost:8000/health
 ```
 
-### 方式 3：本地运行
-
-### 方式 3：本地运行
+### 方式 4：本地运行
 
 ```bash
 # 1. 安装依赖
