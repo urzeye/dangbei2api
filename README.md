@@ -4,8 +4,9 @@
 
 > ⚠️ **免责声明**：本项目仅用于学习研究，严禁用于任何商业用途或违反当贝服务条款的行为。使用者须自行承担一切法律风险与责任。
 
-## 功能
+## 功能特性
 
+### 核心功能
 - ✅ `/v1/chat/completions` — OpenAI Chat Completions 格式（流式 + 非流式）
 - ✅ `/v1/responses` — OpenAI Responses API 格式（流式 + 非流式）
 - ✅ `/v1/models` — 模型列表（自动追加功能变体）
@@ -16,9 +17,58 @@
 - ✅ 匿名免登模式（自动换 deviceid 绕过配额限制）
 - ⚠️ 文件上传需配置登录 token
 
+### 生产级特性（v0.2.0 新增）
+- 🚀 **连接池管理**：复用 HTTP 连接，提升性能
+- 🔒 **限流保护**：可配置请求频率限制，防止滥用
+- 📊 **结构化日志**：支持 JSON 格式输出，便于生产环境分析
+- 💾 **会话持久化**：可选 SQLite 存储（默认内存），支持服务重启后恢复会话
+- 🏥 **健康检查**：`/health` 端点，支持 Kubernetes/Docker 健康探测
+- ⚡ **性能优化**：模型列表缓存、后台定期清理过期会话
+- 🛡️ **统一错误处理**：OpenAI 兼容的错误响应格式
+- 📦 **Docker 优化**：健康检查、资源限制、多阶段构建
+
 ## 快速开始
 
-### 本地运行
+### 方式 1：Docker Compose（推荐）
+
+```bash
+# 1. 克隆项目
+git clone https://github.com/yourusername/dangbei2api.git
+cd dangbei2api
+
+# 2. 启动服务（默认端口 8000）
+docker-compose up -d
+
+# 3. 查看日志
+docker-compose logs -f
+
+# 4. 停止服务
+docker-compose down
+```
+
+### 方式 2：Docker
+
+```bash
+# 构建镜像
+docker build -t dangbei2api .
+
+# 运行容器（内存会话）
+docker run -d -p 8000:8000 --name dangbei2api dangbei2api
+
+# 运行容器（SQLite 持久化会话）
+docker run -d -p 8000:8000 --name dangbei2api \
+  -v $(pwd)/data:/app/data \
+  -e USE_SQLITE_SESSION=true \
+  -e API_KEY=your-secret-key \
+  dangbei2api
+
+# 查看健康状态
+curl http://localhost:8000/health
+```
+
+### 方式 3：本地运行
+
+### 方式 3：本地运行
 
 ```bash
 # 1. 安装依赖
@@ -34,30 +84,48 @@ uv run python -m app.main
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### Docker
+## 配置说明
 
-```bash
-# 构建镜像
-docker build -t dangbei2api .
+所有配置通过环境变量设置，详见 `.env.example`。
 
-# 运行容器
-docker run -d -p 8000:8000 --name dangbei2api dangbei2api
+### 核心配置
 
-# 自定义环境变量
-docker run -d -p 8000:8000 --name dangbei2api \
-  -e API_KEY=your-secret-key \
-  -e DANGBEI_TOKEN=your_token \
-  dangbei2api
-```
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `DANGBEI_BASE_URL` | `https://ai-api.dangbei.net` | 当贝 API 地址 |
+| `HOST` | `0.0.0.0` | 监听地址 |
+| `PORT` | `8000` | 监听端口 |
+| `DEFAULT_MODEL` | `deepseek-v3` | 默认模型 |
+| `API_KEY` | (空) | API 鉴权密钥，留空则不校验 |
+| `DANGBEI_TOKEN` | (空) | 登录 token，匿名模式留空 |
+
+### 会话管理
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `SESSION_EXPIRE_SECONDS` | `1800` | 会话过期时间（秒），0 表示永不过期 |
+| `SESSION_CLEANUP_INTERVAL` | `300` | 会话清理任务间隔（秒） |
+| `USE_SQLITE_SESSION` | `false` | 是否使用 SQLite 存储会话 |
+| `SQLITE_DB_PATH` | `data/sessions.db` | SQLite 数据库文件路径 |
+
+### 性能与限流
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `RATE_LIMIT_ENABLED` | `true` | 是否启用限流 |
+| `RATE_LIMIT_PER_MINUTE` | `60` | 每分钟请求限制 |
+| `HTTP_TIMEOUT` | `300` | HTTP 请求超时时间（秒） |
+| `HTTP_MAX_CONNECTIONS` | `100` | HTTP 最大连接数 |
+| `MODEL_CACHE_TTL` | `3600` | 模型列表缓存时间（秒） |
+
+### 日志配置
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `LOG_LEVEL` | `INFO` | 日志级别（DEBUG/INFO/WARNING/ERROR） |
+| `LOG_JSON` | `false` | 是否输出 JSON 格式日志 |
 
 ## API 使用
-
-> **核心设计**：当贝专有参数通过标准 OpenAI 字段承载，无需任何自定义 Header。
-> - `userAction` → 模型名后缀（如 `deepseek-v3-online-deep`）
-> - 会话保持 → `user` 字段（相同值复用同一会话）
-> - 多轮关联 → `previous_response_id`（标准字段）
-
-### Chat Completions（基础）
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \

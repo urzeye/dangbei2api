@@ -1,135 +1,92 @@
 """
-Route handlers — 完整兼容 OpenAI /v1/chat/completions 和 /v1/responses 协议。
+Route handlers - 优化版本。
 
-当贝专有参数通过标准 OpenAI 字段承载（零自定义 Header）：
-  - userAction (online/deep): 模型名后缀，如 deepseek-v3-online-deep
-  - 会话保持: user 字段（相同 user 值复用同一 conversationId）
-  - /v1/responses 多轮: previous_response_id（标准字段）
+改进：
+1. 使用新的会话存储抽象
+2. 使用 dangbei_client 的上下文管理器
+3. 添加限流保护
+4. 统一错误处理
+5. 添加健康检查
+6. 模型列表缓存
+7. 消除重复代码
 """
-
-from __future__ import annotations
 
 import json
 import time
 import uuid as uuid_lib
+from functools import lru_cache
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from app import converters, dangbei_client
-from app.config import API_KEY, DEFAULT_MODEL, SESSION_EXPIRE_SECONDS
+from app.errors import DangbeiAPIError, validate_request
+from app.logger import get_logger
 from app.models import (
     ChatCompletionRequest,
-    Message,
     ModelInfo,
     ModelListResponse,
+    ResponseInputItem,
     ResponseRequest,
 )
+from app.session_store import get_session_store
+from app.settings import settings
+from app.utils import extract_user_question, parse_model_and_action
 
+logger = get_logger(__name__)
 router = APIRouter()
 
-# ---------------------------------------------------------------------------
-# API Key 鉴权（可选）
-#   - 未配置 API_KEY → 免验证，向后兼容
-#   - 配置了 API_KEY → 必须带 Authorization: Bearer <key>
-# ---------------------------------------------------------------------------
+# 限流器
+limiter = Limiter(key_func=get_remote_address)
+
+# API Key 鉴权
 _security = HTTPBearer(auto_error=False)
+
+# 未提供 user 字段时的默认会话 key
+_DEFAULT_USER_KEY = "__default__"
+
+# Response API 会话映射（response_id → conversation_id）
+_response_store: dict[str, str] = {}
 
 
 def _verify_api_key(credentials: HTTPAuthorizationCredentials | None = Depends(_security)) -> None:
-    """验证 Bearer Token，未配置 API_KEY 时跳过。"""
-    if not API_KEY:
+    """验证 Bearer Token，未配置 API_KEY 时跳过"""
+    if not settings.api_key:
         return  # 免验证模式
+
     if credentials is None:
-        raise HTTPException(status_code=401, detail="缺少 API Key，请通过 Authorization: Bearer <key> 提供")
-    if credentials.credentials != API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="缺少 API Key，请通过 Authorization: Bearer <key> 提供"
+        )
+
+    if credentials.credentials != settings.api_key:
         raise HTTPException(status_code=403, detail="API Key 无效")
-
-# ---------------------------------------------------------------------------
-# 会话映射表（内存）
-#   user_store:      user 值 → (conversation_id, last_access_time)
-#   response_store:  response_id → conversation_id（用于 /v1/response）
-# ---------------------------------------------------------------------------
-user_store: dict[str, tuple[str, float]] = {}  # user → (conversation_id, timestamp)
-response_store: dict[str, str] = {}            # response_id → conversation_id
-
-# 未提供 user 字段时的默认会话 key（服务生命周期内复用同一会话）
-_DEFAULT_USER_KEY = "__default__"
-
-
-def _cleanup_expired_sessions() -> None:
-    """清理过期会话（仅在 SESSION_EXPIRE_SECONDS > 0 时生效）"""
-    if SESSION_EXPIRE_SECONDS <= 0:
-        return
-
-    now = time.time()
-    expired_users = [
-        user for user, (_, last_time) in user_store.items()
-        if now - last_time > SESSION_EXPIRE_SECONDS
-    ]
-    for user in expired_users:
-        del user_store[user]
-
-
-# ============================================================
-# 辅助函数
-# ============================================================
-
-def _extract_user_question(messages: list[Message]) -> str:
-    """从 messages 数组中提取最后一条 user 消息的文本内容。"""
-    for m in reversed(messages):
-        if m.role == "user" and isinstance(m.content, str):
-            return m.content
-    return ""
-
-
-def _parse_model_and_action(model: str) -> tuple[str, str]:
-    """
-    从模型名解析出实际当贝模型名和 userAction。
-
-    >>> _parse_model_and_action("deepseek-v3-online-deep")
-    ("deepseek-v3", "online,deep")
-    >>> _parse_model_and_action("deepseek-v3-online")
-    ("deepseek-v3", "online")
-    >>> _parse_model_and_action("deepseek-v3-deep")
-    ("deepseek-v3", "deep")
-    >>> _parse_model_and_action("deepseek-v3")
-    ("deepseek-v3", "online,deep")   # 默认开启联网+深度思考
-    """
-    known_suffixes = ["-online-deep", "-deep-online", "-online", "-deep", "-basic"]
-    for suffix in known_suffixes:
-        if model.endswith(suffix):
-            base = model[: -len(suffix)]
-            action = suffix[1:]  # 去掉前导 "-"
-            if action in ("deep-online", "online-deep"):
-                action = "online,deep"
-            elif action == "basic":
-                action = ""
-            return base, action
-    # 无已知后缀 → 默认开启 online + deep
-    return model, "online,deep"
 
 
 async def _get_or_create_conversation(user: str | None) -> str:
     """
     基于 user 字段获取或创建会话。
 
-    - user 为 None 或空字符串 → 使用默认 key 复用同一会话（有状态模式）
-    - user 有值 → 查找 user_store，存在则复用，不存在则创建并存入
-    - 自动清理过期会话（SESSION_EXPIRE_SECONDS > 0 时生效）
+    - user 为 None 或空字符串 → 使用默认 key 复用同一会话
+    - user 有值 → 查找 session_store，存在则复用，不存在则创建
     """
-    _cleanup_expired_sessions()  # 每次请求时清理过期会话
-
+    store = await get_session_store()
     effective_user = user if user else _DEFAULT_USER_KEY
 
-    if effective_user in user_store:
-        conversation_id, _ = user_store[effective_user]
-        user_store[effective_user] = (conversation_id, time.time())  # 更新访问时间
+    # 尝试获取已有会话
+    conversation_id = await store.get(effective_user)
+    if conversation_id:
+        logger.debug("复用已有会话", user=effective_user, conversation_id=conversation_id)
         return conversation_id
 
+    # 创建新会话
     conversation_id = await dangbei_client.create_conversation()
-    user_store[effective_user] = (conversation_id, time.time())
+    await store.set(effective_user, conversation_id)
+    logger.info("创建新会话", user=effective_user, conversation_id=conversation_id)
     return conversation_id
 
 
@@ -141,56 +98,110 @@ async def _resolve_conversation_for_response(
     为 /v1/response 解析 conversation_id。
 
     优先级：previous_response_id > user > 默认会话 > 新建
-
-    返回 (conversation_id, is_new)。
+    返回 (conversation_id, is_new)
     """
-    _cleanup_expired_sessions()  # 每次请求时清理过期会话
+    store = await get_session_store()
 
     # 1. 通过 previous_response_id 查找
-    if previous_response_id and previous_response_id in response_store:
-        conversation_id = response_store[previous_response_id]
-        # 更新对应 user 的访问时间
-        for user_key, (conv_id, _) in user_store.items():
-            if conv_id == conversation_id:
-                user_store[user_key] = (conv_id, time.time())
-                break
+    if previous_response_id and previous_response_id in _response_store:
+        conversation_id = _response_store[previous_response_id]
+        logger.debug("通过 response_id 复用会话", conversation_id=conversation_id)
         return conversation_id, False
 
     # 2. 通过 user 查找（含默认 key）
     effective_user = user if user else _DEFAULT_USER_KEY
-    if effective_user in user_store:
-        conversation_id, _ = user_store[effective_user]
-        user_store[effective_user] = (conversation_id, time.time())  # 更新访问时间
+    conversation_id = await store.get(effective_user)
+    if conversation_id:
+        logger.debug("通过 user 复用会话", user=effective_user, conversation_id=conversation_id)
         return conversation_id, False
 
     # 3. 新建会话
     conversation_id = await dangbei_client.create_conversation()
-    user_store[effective_user] = (conversation_id, time.time())
+    await store.set(effective_user, conversation_id)
+    logger.info("为 Response API 创建新会话", user=effective_user, conversation_id=conversation_id)
     return conversation_id, True
+
+
+# ============================================================
+# 健康检查
+# ============================================================
+
+@router.get("/health")
+async def health_check():
+    """
+    健康检查端点。
+
+    检查：
+    - 服务运行状态
+    - 当贝 API 连通性
+    - 会话存储状态
+    """
+    health_status = {
+        "status": "healthy",
+        "timestamp": int(time.time()),
+        "version": "0.2.0",
+    }
+
+    # 检查当贝 API 连通性
+    try:
+        await dangbei_client.get_http_client()
+        health_status["dangbei_api"] = "connected"
+    except Exception as e:
+        health_status["status"] = "unhealthy"
+        health_status["dangbei_api"] = f"error: {e}"
+
+    # 检查会话存储
+    try:
+        store = await get_session_store()
+        sessions = await store.list_all()
+        health_status["session_store"] = {
+            "type": "sqlite" if settings.use_sqlite_session else "memory",
+            "active_sessions": len(sessions),
+        }
+    except Exception as e:
+        health_status["status"] = "unhealthy"
+        health_status["session_store"] = f"error: {e}"
+
+    status_code = 200 if health_status["status"] == "healthy" else 503
+    return JSONResponse(content=health_status, status_code=status_code)
 
 
 # ============================================================
 # /v1/models
 # ============================================================
 
+# 模型列表缓存（避免频繁请求当贝 API）
+_model_cache: tuple[float, ModelListResponse] | None = None
+
+
 @router.get("/v1/models")
 async def list_models(_auth: None = Depends(_verify_api_key)):
     """
     列出当贝可用模型（OpenAI 格式）。
 
-    根据 getChatModelConfig 返回的 option[].disable 精确追加功能变体：
-    - 仅当 deep 的 disable=false 时才追加 -deep / -online-deep 变体
-    - 仅当 online 的 disable=false 时才追加 -online / -online-deep 变体
-    - -basic（无功能）始终可用
+    根据 getChatModelConfig 返回的 option[].disable 精确追加功能变体。
+    结果会缓存一段时间以提高性能。
     """
+    global _model_cache
+
+    # 检查缓存
+    now = time.time()
+    if _model_cache is not None:
+        cache_time, cached_response = _model_cache
+        if now - cache_time < settings.model_cache_ttl:
+            logger.debug("使用模型列表缓存")
+            return cached_response
+
+    # 获取最新模型列表
     try:
         models = await dangbei_client.get_model_list()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"获取模型列表失败: {e}")
+    except DangbeiAPIError as e:
+        raise HTTPException(status_code=e.status_code, detail=f"获取模型列表失败: {e.message}")
 
     data: list[ModelInfo] = []
     for m in models:
         model_id = m["value"]
+
         # 解析 option 数组，获取各能力的 disable 状态
         options = m.get("option", [])
         cap_disable: dict[str, bool] = {}
@@ -212,7 +223,13 @@ async def list_models(_auth: None = Depends(_verify_api_key)):
         if has_deep:
             data.append(ModelInfo(id=f"{model_id}-deep"))
 
-    return ModelListResponse(data=data)
+    response = ModelListResponse(data=data)
+
+    # 更新缓存
+    _model_cache = (now, response)
+    logger.info("模型列表已缓存", count=len(data), ttl=settings.model_cache_ttl)
+
+    return response
 
 
 # ============================================================
@@ -221,15 +238,14 @@ async def list_models(_auth: None = Depends(_verify_api_key)):
 
 @router.delete("/v1/conversations")
 async def reset_all_conversations(_auth: None = Depends(_verify_api_key)):
-    """
-    清空所有会话，重新开始。
+    """清空所有会话，重新开始"""
+    store = await get_session_store()
+    user_count = await store.clear()
+    response_count = len(_response_store)
+    _response_store.clear()
 
-    场景：想要重置默认会话或清理所有用户会话时使用。
-    """
-    user_count = len(user_store)
-    response_count = len(response_store)
-    user_store.clear()
-    response_store.clear()
+    logger.info("清空所有会话", user_count=user_count, response_count=response_count)
+
     return {
         "message": "所有会话已清空",
         "cleared_users": user_count,
@@ -239,26 +255,28 @@ async def reset_all_conversations(_auth: None = Depends(_verify_api_key)):
 
 @router.delete("/v1/conversations/{user}")
 async def reset_user_conversation(user: str, _auth: None = Depends(_verify_api_key)):
-    """
-    清空指定 user 的会话。
+    """清空指定 user 的会话"""
+    store = await get_session_store()
+    deleted = await store.delete(user)
 
-    Args:
-        user: 用户标识，传 "__default__" 可清空默认会话
-    """
-    if user in user_store:
-        del user_store[user]
+    if deleted:
+        logger.info("清空用户会话", user=user)
         return {"message": f"会话 '{user}' 已清空"}
-    return {"message": f"会话 '{user}' 不存在", "available_users": list(user_store.keys())}
+
+    sessions = await store.list_all()
+    available_users = [s[0] for s in sessions]
+    return {"message": f"会话 '{user}' 不存在", "available_users": available_users}
 
 
 @router.get("/v1/conversations")
 async def list_conversations(_auth: None = Depends(_verify_api_key)):
-    """
-    列出当前所有活跃会话及其最后访问时间。
-    """
+    """列出当前所有活跃会话及其最后访问时间"""
+    store = await get_session_store()
+    sessions_data = await store.list_all()
+
     now = time.time()
     sessions = []
-    for user, (conv_id, last_time) in user_store.items():
+    for user, conv_id, last_time in sessions_data:
         idle_seconds = int(now - last_time)
         sessions.append({
             "user": user,
@@ -266,10 +284,11 @@ async def list_conversations(_auth: None = Depends(_verify_api_key)):
             "last_access": idle_seconds,
             "idle_seconds": idle_seconds,
         })
+
     return {
         "total": len(sessions),
         "sessions": sessions,
-        "expire_seconds": SESSION_EXPIRE_SECONDS if SESSION_EXPIRE_SECONDS > 0 else None,
+        "expire_seconds": settings.session_expire_seconds if settings.session_expire_seconds > 0 else None,
     }
 
 
@@ -278,59 +297,58 @@ async def list_conversations(_auth: None = Depends(_verify_api_key)):
 # ============================================================
 
 @router.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest, _auth: None = Depends(_verify_api_key)):
+@limiter.limit(f"{settings.rate_limit_per_minute}/minute" if settings.rate_limit_enabled else "1000000/minute")
+async def chat_completions(
+    request: Request,
+    req: ChatCompletionRequest,
+    _auth: None = Depends(_verify_api_key)
+):
     """
     OpenAI 兼容 /v1/chat/completions 端点。
 
     支持流式 (SSE) 和非流式。
-    - 模型名后缀控制 userAction：deepseek-v3-online-deep → 联网+深度思考
-    - user 字段控制会话保持：相同 user 值复用同一 conversationId
+    - 模型名后缀控制 userAction
+    - user 字段控制会话保持
     - 零自定义 Header
     """
-    question = _extract_user_question(req.messages)
-    if not question:
-        raise HTTPException(status_code=400, detail="至少需要一条 user 消息")
+    question = extract_user_question(req.messages)
+    validate_request(bool(question), "至少需要一条 user 消息")
 
     # 从模型名解析 base_model 和 user_action
-    model = req.model or DEFAULT_MODEL
-    base_model, user_action = _parse_model_and_action(model)
+    model = req.model or settings.default_model
+    base_model, user_action = parse_model_and_action(model)
 
     # 基于 user 字段获取或创建会话
-    try:
-        conversation_id = await _get_or_create_conversation(req.user)
-        chat_id = await dangbei_client.generate_id()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"当贝 API 错误: {e}")
+    conversation_id = await _get_or_create_conversation(req.user)
+    chat_id = await dangbei_client.generate_id()
 
-    # ------------------------------------------------------------------
+    logger.info(
+        "处理 chat.completions 请求",
+        model=base_model,
+        user_action=user_action,
+        stream=req.stream,
+        user=req.user or _DEFAULT_USER_KEY,
+    )
+
     # 流式响应
-    # ------------------------------------------------------------------
     if req.stream:
         async def event_stream():
-            response = None
             try:
-                response = await dangbei_client.chat_sse(
+                async with dangbei_client.chat_sse_stream(
                     conversation_id=conversation_id,
                     chat_id=chat_id,
                     question=question,
                     model=base_model,
                     user_action=user_action,
-                )
-                async for chunk in converters.sse_to_openai_stream(
-                    response.aiter_lines(), model
-                ):
-                    yield chunk
-            except Exception as e:
+                ) as stream:
+                    async for chunk in converters.sse_to_openai_stream(stream, model):
+                        yield chunk
+            except DangbeiAPIError as e:
                 error_chunk = json.dumps({
-                    "error": {"message": str(e), "type": "dangbei_error"}
+                    "error": {"message": str(e.message), "type": "dangbei_error"}
                 }, ensure_ascii=False)
                 yield f"data: {error_chunk}\n\n"
                 yield "data: [DONE]\n\n"
-            finally:
-                if response is not None:
-                    await response.aclose()
-                    if hasattr(response, '_client'):
-                        await response._client.aclose()
 
         return StreamingResponse(
             event_stream(),
@@ -342,31 +360,20 @@ async def chat_completions(req: ChatCompletionRequest, _auth: None = Depends(_ve
             },
         )
 
-    # ------------------------------------------------------------------
     # 非流式响应
-    # ------------------------------------------------------------------
-    response = None
     try:
-        response = await dangbei_client.chat_sse(
+        async with dangbei_client.chat_sse_stream(
             conversation_id=conversation_id,
             chat_id=chat_id,
             question=question,
             model=base_model,
             user_action=user_action,
-        )
-        result = await converters.sse_to_openai_full(
-            response.aiter_lines(), model
-        )
-        # 在响应中附加 conversation_id（通过 _conversation_id 内部字段）
-        result["_conversation_id"] = conversation_id
-        return JSONResponse(content=result)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"当贝 API 错误: {e}")
-    finally:
-        if response is not None:
-            await response.aclose()
-            if hasattr(response, '_client'):
-                await response._client.aclose()
+        ) as stream:
+            result = await converters.sse_to_openai_full(stream, model)
+            result["_conversation_id"] = conversation_id
+            return JSONResponse(content=result)
+    except DangbeiAPIError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
 
 
 # ============================================================
@@ -374,7 +381,12 @@ async def chat_completions(req: ChatCompletionRequest, _auth: None = Depends(_ve
 # ============================================================
 
 @router.post("/v1/responses")
-async def responses_api(req: ResponseRequest, _auth: None = Depends(_verify_api_key)):
+@limiter.limit(f"{settings.rate_limit_per_minute}/minute" if settings.rate_limit_enabled else "1000000/minute")
+async def responses_api(
+    request: Request,
+    req: ResponseRequest,
+    _auth: None = Depends(_verify_api_key)
+):
     """
     OpenAI 兼容 /v1/responses 端点。
 
@@ -382,59 +394,53 @@ async def responses_api(req: ResponseRequest, _auth: None = Depends(_verify_api_
     - 模型名后缀控制 userAction
     - previous_response_id 标准字段支持多轮对话
     - user 字段支持会话保持
-    - 零自定义 Header
     """
     user_inputs = [item for item in req.input if item.role == "user"]
-    if not user_inputs:
-        raise HTTPException(status_code=400, detail="至少需要一条 user 输入")
+    validate_request(bool(user_inputs), "至少需要一条 user 输入")
     question = user_inputs[-1].content
 
     # 从模型名解析 base_model 和 user_action
-    model = req.model or DEFAULT_MODEL
-    base_model, user_action = _parse_model_and_action(model)
+    model = req.model or settings.default_model
+    base_model, user_action = parse_model_and_action(model)
 
     # 解析会话
-    try:
-        conversation_id, is_new = await _resolve_conversation_for_response(
-            req.previous_response_id, req.user
-        )
-        chat_id = await dangbei_client.generate_id()
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"当贝 API 错误: {e}")
+    conversation_id, is_new = await _resolve_conversation_for_response(
+        req.previous_response_id, req.user
+    )
+    chat_id = await dangbei_client.generate_id()
 
     # 生成 response_id 并建立映射
     response_id = f"resp_{uuid_lib.uuid4().hex[:24]}"
-    response_store[response_id] = conversation_id
+    _response_store[response_id] = conversation_id
 
-    # ------------------------------------------------------------------
+    logger.info(
+        "处理 responses 请求",
+        model=base_model,
+        user_action=user_action,
+        stream=req.stream,
+        user=req.user or _DEFAULT_USER_KEY,
+        is_new_conversation=is_new,
+    )
+
     # 流式响应
-    # ------------------------------------------------------------------
     if req.stream:
         async def event_stream():
-            resp = None
             try:
-                resp = await dangbei_client.chat_sse(
+                async with dangbei_client.chat_sse_stream(
                     conversation_id=conversation_id,
                     chat_id=chat_id,
                     question=question,
                     model=base_model,
                     user_action=user_action,
-                )
-                async for chunk in converters.sse_to_response_stream(
-                    resp.aiter_lines(), model, response_id
-                ):
-                    yield chunk
-            except Exception as e:
+                ) as stream:
+                    async for chunk in converters.sse_to_response_stream(stream, model, response_id):
+                        yield chunk
+            except DangbeiAPIError as e:
                 error_event = json.dumps({
                     "type": "error",
-                    "error": {"message": str(e), "type": "dangbei_error"},
+                    "error": {"message": str(e.message), "type": "dangbei_error"},
                 }, ensure_ascii=False)
                 yield f"event: error\ndata: {error_event}\n\n"
-            finally:
-                if resp is not None:
-                    await resp.aclose()
-                    if hasattr(resp, '_client'):
-                        await resp._client.aclose()
 
         return StreamingResponse(
             event_stream(),
@@ -446,28 +452,17 @@ async def responses_api(req: ResponseRequest, _auth: None = Depends(_verify_api_
             },
         )
 
-    # ------------------------------------------------------------------
     # 非流式响应
-    # ------------------------------------------------------------------
-    resp = None
     try:
-        resp = await dangbei_client.chat_sse(
+        async with dangbei_client.chat_sse_stream(
             conversation_id=conversation_id,
             chat_id=chat_id,
             question=question,
             model=base_model,
             user_action=user_action,
-        )
-        result = await converters.sse_to_response_full(
-            resp.aiter_lines(), model, response_id
-        )
-        result["_conversation_id"] = conversation_id
-        return JSONResponse(content=result)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"当贝 API 错误: {e}")
-    finally:
-        if resp is not None:
-            await resp.aclose()
-            if hasattr(resp, '_client'):
-                await resp._client.aclose()
-
+        ) as stream:
+            result = await converters.sse_to_response_full(stream, model, response_id)
+            result["_conversation_id"] = conversation_id
+            return JSONResponse(content=result)
+    except DangbeiAPIError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)

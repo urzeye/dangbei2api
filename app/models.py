@@ -1,5 +1,5 @@
 """
-Pydantic models — 完整兼容 OpenAI /v1/chat/completions 和 /v1/response 协议。
+Pydantic models - 完整兼容 OpenAI /v1/chat/completions 和 /v1/response 协议。
 
 当贝专有参数通过标准 OpenAI 字段承载：
   - userAction (online/deep): 模型名后缀，如 deepseek-v3-online-deep
@@ -64,28 +64,42 @@ class StreamOptions(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    """OpenAI /v1/chat/completions 完整请求模型。"""
-    model: str = "deepseek-v3"
-    messages: list[Message]
-    frequency_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
-    logit_bias: dict[str, float] | None = None
-    logprobs: bool | None = None
-    max_completion_tokens: int | None = None
-    max_tokens: int | None = None
-    n: int | None = Field(default=None, ge=1)
-    parallel_tool_calls: bool | None = None
-    presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0)
-    response_format: ResponseFormat | None = None
-    seed: int | None = None
-    service_tier: Literal["auto", "default"] | None = None
-    stop: str | list[str] | None = None
-    stream: bool = False
-    stream_options: StreamOptions | None = None
-    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
-    top_p: float | None = Field(default=None, ge=0.0, le=1.0)
-    tools: list[ToolDef] | None = None
-    tool_choice: str | dict[str, Any] | None = None
-    user: str | None = None
+    """OpenAI /v1/chat/completions 完整请求模型"""
+    model: str = Field(default="deepseek-v3", description="模型 ID，支持后缀控制功能（-online、-deep、-online-deep、-basic）")
+    messages: list[Message] = Field(description="对话消息列表")
+    frequency_penalty: float | None = Field(default=None, ge=-2.0, le=2.0, description="频率惩罚")
+    logit_bias: dict[str, float] | None = Field(default=None, description="Logit 偏置")
+    logprobs: bool | None = Field(default=None, description="是否返回 log 概率")
+    max_completion_tokens: int | None = Field(default=None, description="最大生成 token 数")
+    max_tokens: int | None = Field(default=None, description="最大 token 数（已弃用，使用 max_completion_tokens）")
+    n: int | None = Field(default=None, ge=1, description="生成的回复数量")
+    parallel_tool_calls: bool | None = Field(default=None, description="是否并行调用工具")
+    presence_penalty: float | None = Field(default=None, ge=-2.0, le=2.0, description="存在惩罚")
+    response_format: ResponseFormat | None = Field(default=None, description="响应格式")
+    seed: int | None = Field(default=None, description="随机种子")
+    service_tier: Literal["auto", "default"] | None = Field(default=None, description="服务层级")
+    stop: str | list[str] | None = Field(default=None, description="停止序列")
+    stream: bool = Field(default=False, description="是否使用流式输出")
+    stream_options: StreamOptions | None = Field(default=None, description="流式选项")
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0, description="温度参数")
+    top_p: float | None = Field(default=None, ge=0.0, le=1.0, description="核采样参数")
+    tools: list[ToolDef] | None = Field(default=None, description="可用工具列表")
+    tool_choice: str | dict[str, Any] | None = Field(default=None, description="工具选择策略")
+    user: str | None = Field(default=None, description="用户标识（用于会话隔离）")
+
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "model": "deepseek-v3-online-deep",
+                    "messages": [{"role": "user", "content": "你好"}],
+                    "stream": True,
+                    "user": "alice",
+                }
+            ]
+        }
+    }
 
 
 # ============================================================

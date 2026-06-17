@@ -4,48 +4,12 @@ SSE event parsers and format converters.
 Dangbei SSE events:
   - conversation.message.delta  → content_type: text | card | progress
   - conversation.chat.completed → final marker
-
-模型名后缀 → userAction 映射：
-  deepseek-v3               → 默认 online,deep
-  deepseek-v3-online        → online
-  deepseek-v3-deep          → deep
-  deepseek-v3-online-deep   → online,deep
-  deepseek-v3-basic         → 无（纯对话）
 """
 
 import json
 import time
 import uuid as uuid_lib
-from typing import AsyncIterator, Optional
-
-from app.config import DEFAULT_USER_ACTION
-
-
-def parse_model_action(model: str) -> tuple[str, str]:
-    """
-    从模型名解析出实际当贝模型名和 userAction。
-
-    >>> parse_model_action("deepseek-v3-online-deep")
-    ("deepseek-v3", "online,deep")
-    >>> parse_model_action("deepseek-v3-online")
-    ("deepseek-v3", "online")
-    >>> parse_model_action("deepseek-v3-basic")
-    ("deepseek-v3", "")
-    >>> parse_model_action("deepseek-v3")
-    ("deepseek-v3", "online,deep")   # 默认开启
-    """
-    known_suffixes = ["-online-deep", "-deep-online", "-online", "-deep", "-basic"]
-    for suffix in known_suffixes:
-        if model.endswith(suffix):
-            base = model[: -len(suffix)]
-            action = suffix[1:]  # 去掉前导 "-"
-            if action in ("deep-online", "online-deep"):
-                action = "online,deep"
-            elif action == "basic":
-                action = ""
-            return base, action
-    # 无已知后缀 → 默认开启 online + deep
-    return model, DEFAULT_USER_ACTION
+from typing import AsyncIterator
 
 
 def _make_openai_chunk(
@@ -53,7 +17,7 @@ def _make_openai_chunk(
     model: str,
     chunk_id: str,
     role: str = "assistant",
-    finish_reason: Optional[str] = None,
+    finish_reason: str | None = None,
 ) -> dict:
     """Build an OpenAI-compatible streaming chunk."""
     chunk = {
@@ -90,7 +54,7 @@ def _make_openai_final(chunk_id: str, model: str) -> dict:
 def _make_response_event(
     event_type: str,
     text: str = "",
-    item_id: Optional[str] = None,
+    item_id: str | None = None,
     output_index: int = 0,
     content_index: int = 0,
 ) -> dict:

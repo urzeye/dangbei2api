@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  dangbei2api:
+    build: .
+    container_name: dangbei2api
+    ports:
+      - "8000:8000"
+    environment:
+      # 服务器配置
+      - HOST=0.0.0.0
+      - PORT=8000
+
+      # 模型配置
+      - DEFAULT_MODEL=deepseek-v3
+      - DEFAULT_USER_ACTION=online,deep
+
+      # 鉴权配置（可选）
+      # - API_KEY=your-secret-key
+
+      # 当贝 API 配置（可选）
+      # - DANGBEI_TOKEN=your_token_here
+
+      # 会话管理
+      - SESSION_EXPIRE_SECONDS=1800
+      - SESSION_CLEANUP_INTERVAL=300
+      - USE_SQLITE_SESSION=true
+      - SQLITE_DB_PATH=/app/data/sessions.db
+
+      # 日志配置
+      - LOG_LEVEL=INFO
+      - LOG_JSON=false
+
+      # 限流配置
+      - RATE_LIMIT_ENABLED=true
+      - RATE_LIMIT_PER_MINUTE=60
+
+      # 性能配置
+      - HTTP_TIMEOUT=300
+      - HTTP_MAX_CONNECTIONS=100
+      - HTTP_MAX_KEEPALIVE=20
+      - MODEL_CACHE_TTL=3600
+
+    volumes:
+      # 持久化会话数据（使用 SQLite 时）
+      - ./data:/app/data
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+    # 资源限制（可选）
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+# 可选：添加 nginx 反向代理
+#  nginx:
+#    image: nginx:alpine
+#    container_name: dangbei2api-nginx
+#    ports:
+#      - "80:80"
+#      - "443:443"
+#    volumes:
+#      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+#      - ./ssl:/etc/nginx/ssl:ro
+#    depends_on:
+#      - dangbei2api
+#    restart: unless-stopped
+
+volumes:
+  data:
+    driver: local

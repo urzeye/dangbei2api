@@ -1,8 +1,49 @@
+# Python
 __pycache__/
-*.pyc
-.env
-.venv/
-venv/
+*.py[cod]
+*$py.class
+*.so
+.Python
 *.egg-info/
 dist/
 build/
+
+# 虚拟环境
+.venv/
+venv/
+ENV/
+env/
+
+# 环境变量（保留示例文件）
+.env
+.env.local
+
+# 数据文件
+data/
+*.db
+*.sqlite
+*.sqlite-journal
+
+# 日志
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 测试
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# 其他
+*.bak
+.mypy_cache/
+.ruff_cache/
+
