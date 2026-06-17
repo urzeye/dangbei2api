@@ -16,6 +16,9 @@ API_KEY = os.getenv("API_KEY", "")
 # 默认开启联网搜索 + 深度思考（模型支持时自动生效）
 DEFAULT_USER_ACTION = os.getenv("DEFAULT_USER_ACTION", "online,deep")
 
+# 会话过期时间（秒），0 表示永不过期
+SESSION_EXPIRE_SECONDS = int(os.getenv("SESSION_EXPIRE_SECONDS", "1800"))  # 默认 30 分钟
+
 # 当贝模型名 → userAction 后缀映射
 # 客户端通过模型名后缀控制行为：
 #   deepseek-v3            → 纯对话

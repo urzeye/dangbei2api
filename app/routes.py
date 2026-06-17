@@ -10,6 +10,7 @@ Route handlers — 完整兼容 OpenAI /v1/chat/completions 和 /v1/responses �
 from __future__ import annotations
 
 import json
+import time
 import uuid as uuid_lib
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,7 +18,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app import converters, dangbei_client
-from app.config import API_KEY, DEFAULT_MODEL
+from app.config import API_KEY, DEFAULT_MODEL, SESSION_EXPIRE_SECONDS
 from app.models import (
     ChatCompletionRequest,
     Message,
@@ -47,14 +48,28 @@ def _verify_api_key(credentials: HTTPAuthorizationCredentials | None = Depends(_
 
 # ---------------------------------------------------------------------------
 # 会话映射表（内存）
-#   user_store:      user 值 → conversation_id（用于 /v1/chat/completions）
+#   user_store:      user 值 → (conversation_id, last_access_time)
 #   response_store:  response_id → conversation_id（用于 /v1/response）
 # ---------------------------------------------------------------------------
-user_store: dict[str, str] = {}          # user → conversation_id
-response_store: dict[str, str] = {}      # response_id → conversation_id
+user_store: dict[str, tuple[str, float]] = {}  # user → (conversation_id, timestamp)
+response_store: dict[str, str] = {}            # response_id → conversation_id
 
 # 未提供 user 字段时的默认会话 key（服务生命周期内复用同一会话）
 _DEFAULT_USER_KEY = "__default__"
+
+
+def _cleanup_expired_sessions() -> None:
+    """清理过期会话（仅在 SESSION_EXPIRE_SECONDS > 0 时生效）"""
+    if SESSION_EXPIRE_SECONDS <= 0:
+        return
+
+    now = time.time()
+    expired_users = [
+        user for user, (_, last_time) in user_store.items()
+        if now - last_time > SESSION_EXPIRE_SECONDS
+    ]
+    for user in expired_users:
+        del user_store[user]
 
 
 # ============================================================
@@ -102,14 +117,19 @@ async def _get_or_create_conversation(user: str | None) -> str:
 
     - user 为 None 或空字符串 → 使用默认 key 复用同一会话（有状态模式）
     - user 有值 → 查找 user_store，存在则复用，不存在则创建并存入
+    - 自动清理过期会话（SESSION_EXPIRE_SECONDS > 0 时生效）
     """
+    _cleanup_expired_sessions()  # 每次请求时清理过期会话
+
     effective_user = user if user else _DEFAULT_USER_KEY
 
     if effective_user in user_store:
-        return user_store[effective_user]
+        conversation_id, _ = user_store[effective_user]
+        user_store[effective_user] = (conversation_id, time.time())  # 更新访问时间
+        return conversation_id
 
     conversation_id = await dangbei_client.create_conversation()
-    user_store[effective_user] = conversation_id
+    user_store[effective_user] = (conversation_id, time.time())
     return conversation_id
 
 
@@ -124,18 +144,28 @@ async def _resolve_conversation_for_response(
 
     返回 (conversation_id, is_new)。
     """
+    _cleanup_expired_sessions()  # 每次请求时清理过期会话
+
     # 1. 通过 previous_response_id 查找
     if previous_response_id and previous_response_id in response_store:
-        return response_store[previous_response_id], False
+        conversation_id = response_store[previous_response_id]
+        # 更新对应 user 的访问时间
+        for user_key, (conv_id, _) in user_store.items():
+            if conv_id == conversation_id:
+                user_store[user_key] = (conv_id, time.time())
+                break
+        return conversation_id, False
 
     # 2. 通过 user 查找（含默认 key）
     effective_user = user if user else _DEFAULT_USER_KEY
     if effective_user in user_store:
-        return user_store[effective_user], False
+        conversation_id, _ = user_store[effective_user]
+        user_store[effective_user] = (conversation_id, time.time())  # 更新访问时间
+        return conversation_id, False
 
     # 3. 新建会话
     conversation_id = await dangbei_client.create_conversation()
-    user_store[effective_user] = conversation_id
+    user_store[effective_user] = (conversation_id, time.time())
     return conversation_id, True
 
 
@@ -183,6 +213,64 @@ async def list_models(_auth: None = Depends(_verify_api_key)):
             data.append(ModelInfo(id=f"{model_id}-deep"))
 
     return ModelListResponse(data=data)
+
+
+# ============================================================
+# 会话管理端点
+# ============================================================
+
+@router.delete("/v1/conversations")
+async def reset_all_conversations(_auth: None = Depends(_verify_api_key)):
+    """
+    清空所有会话，重新开始。
+
+    场景：想要重置默认会话或清理所有用户会话时使用。
+    """
+    user_count = len(user_store)
+    response_count = len(response_store)
+    user_store.clear()
+    response_store.clear()
+    return {
+        "message": "所有会话已清空",
+        "cleared_users": user_count,
+        "cleared_responses": response_count,
+    }
+
+
+@router.delete("/v1/conversations/{user}")
+async def reset_user_conversation(user: str, _auth: None = Depends(_verify_api_key)):
+    """
+    清空指定 user 的会话。
+
+    Args:
+        user: 用户标识，传 "__default__" 可清空默认会话
+    """
+    if user in user_store:
+        del user_store[user]
+        return {"message": f"会话 '{user}' 已清空"}
+    return {"message": f"会话 '{user}' 不存在", "available_users": list(user_store.keys())}
+
+
+@router.get("/v1/conversations")
+async def list_conversations(_auth: None = Depends(_verify_api_key)):
+    """
+    列出当前所有活跃会话及其最后访问时间。
+    """
+    now = time.time()
+    sessions = []
+    for user, (conv_id, last_time) in user_store.items():
+        idle_seconds = int(now - last_time)
+        sessions.append({
+            "user": user,
+            "conversation_id": conv_id,
+            "last_access": idle_seconds,
+            "idle_seconds": idle_seconds,
+        })
+    return {
+        "total": len(sessions),
+        "sessions": sessions,
+        "expire_seconds": SESSION_EXPIRE_SECONDS if SESSION_EXPIRE_SECONDS > 0 else None,
+    }
 
 
 # ============================================================

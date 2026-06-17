@@ -109,10 +109,12 @@ curl http://localhost:8000/v1/chat/completions \
 
 **会话隔离**：通过标准 `user` 字段为不同用户/对话创建独立会话，互不干扰。
 
+**会话过期**：会话默认 30 分钟不活跃自动失效（可通过 `SESSION_EXPIRE_SECONDS` 配置），过期后下次请求自动创建新会话。
+
 | 场景 | `user` 字段 | 行为 |
 |------|------------|------|
-| 不传 `user` | 空 | 共享默认会话（有记忆） |
-| 传 `user: "alice"` | alice | alice 独立会话（有记忆） |
+| 不传 `user` | 空 | 共享默认会话（有记忆，30 分钟过期） |
+| 传 `user: "alice"` | alice | alice 独立会话（有记忆，30 分钟过期） |
 | 传 `user: "bob"` | bob | bob 独立会话（有记忆，与 alice 隔离） |
 
 ```bash
@@ -167,6 +169,35 @@ curl http://localhost:8000/v1/chat/completions \
     "stream": false
   }'
 # → 回答：你叫小明 ✅
+```
+
+### 会话管理
+
+**手动重置会话**：想要重新开始对话时，调用会话管理端点清空会话。
+
+```bash
+# 清空所有会话
+curl -X DELETE http://localhost:8000/v1/conversations \
+  -H "Authorization: Bearer your-secret-key"  # 配置了 API_KEY 时需要
+
+# 清空指定用户会话
+curl -X DELETE http://localhost:8000/v1/conversations/alice
+
+# 清空默认会话（不传 user 时使用的会话）
+curl -X DELETE http://localhost:8000/v1/conversations/__default__
+
+# 查看当前活跃会话
+curl http://localhost:8000/v1/conversations
+```
+
+**Shell 快捷命令**（可选）：
+
+```bash
+# 添加到 ~/.bashrc 或 ~/.zshrc
+alias reset-dangbei="curl -X DELETE http://localhost:8000/v1/conversations"
+
+# 使用
+reset-dangbei
 ```
 
 > **注意**：会话存储在内存中，服务重启后所有会话丢失。同一 `user` 值始终映射到同一会话，如需同一用户开启多个独立对话，请使用不同的 `user` 值（如 `alice-work`、`alice-study`）。
@@ -242,6 +273,7 @@ r3 = client.chat.completions.create(
 | `API_KEY` | (空) | API 鉴权密钥，留空则不校验 |
 | `DANGBEI_TOKEN` | (空) | 登录 token，匿名模式留空 |
 | `DEFAULT_USER_ACTION` | `online,deep` | 默认行为（无后缀模型时生效） |
+| `SESSION_EXPIRE_SECONDS` | `1800` | 会话过期时间（秒），0 表示永不过期 |
 
 ### API Key 鉴权
 
@@ -278,3 +310,4 @@ app/converters.py      ← SSE 事件 → OpenAI / Response 格式转换
 - **登录模式**：配置 `DANGBEI_TOKEN` 后可上传文件（需额外实现 OSS 上传链路）
 - **深度思考**：匿名模式下思考过程不单独流式输出，仅返回最终答案
 - **会话存储**：`user → conversationId` 映射存储在内存中，服务重启后丢失
+- **会话过期**：默认 30 分钟不活跃自动失效，设置 `SESSION_EXPIRE_SECONDS=0` 可永久保留
